@@ -120,17 +120,22 @@ the learner to demonstrate understanding through progressively harder tap-only e
 mistake becomes something the learner can deliberately drill later.
 
 #### 3.2.1 Hierarchy
-`Course → Level → Unit → Lesson → { LearningItems, Exercises }`, mirroring real TEF competencies
-(e.g. the seeded B1 unit "Expressing Opinions" — TEF Task B's core skill). A **LearningItem** is
-vocabulary, a grammar concept, or a phrase/expression, each with a stable id so progress, mistakes,
-review scheduling, and the Call's mastered-expression theming (§3.1.6) all reference the same
-object. Lessons are gated linearly (a lesson unlocks once the previous one in its unit is done, and
-a unit's first lesson unlocks once the previous unit is fully done); the path screen always shows
-one obvious next action ("Continue learning").
+`Course → Level → Unit → Lesson → { LearningItems, Exercises }`, mirroring real TEF competencies.
+The course covers **every official TEF theme** — the "Expressing Opinions" foundation unit (TEF
+Task B's core skill) plus hand-authored units for the fourteen themes it exists in (Le travail,
+L'environnement, Les nouvelles technologies, La santé, L'éducation, La famille, La société, Les
+médias, La culture, L'économie, Les transports, La consommation, Le sport, La politique), each
+taught at B1. Each unit is built from the same argumentation toolkit as the foundation unit
+(opinion phrases, reasons, examples, contrast), so the path doubles as Task B practice. A
+**LearningItem** is vocabulary, a grammar concept, or a phrase/expression, each with a stable id
+so progress, mistakes, review scheduling, and the Call's mastered-expression theming (§3.1.6) all
+reference the same object. Lessons are gated linearly (a lesson unlocks once the previous one in
+its unit is done, and a unit's first lesson unlocks once the previous unit is fully done); the
+path screen always shows one obvious next action ("Continue learning").
 
-The curriculum is not fixed to one hand-authored unit: a learner can grow it on demand via
+The curriculum is not fixed to the hand-authored themes: a learner can grow it on demand via
 **"Generate a new unit"** (§3.2.6), so the path can extend to arbitrarily many TEF-relevant topics
-without every one being hand-written up front.
+without every one being covered by hand-authored content.
 
 #### 3.2.2 Exercise types (v1) — all tap-only, no typing
 Four types, evaluated by `src/lib/learningEngine/evaluate.js` (pure functions, never an LLM call
@@ -185,7 +190,7 @@ derived from real mastery data. `masteredExpressions` feeds the Call (§3.1.6); 
 for a future fuller AI Coach.
 
 #### 3.2.6 AI-generated units (growing the curriculum)
-Beyond the hand-authored seed unit in `src/content/course.js`, a learner can tap **"Generate a new
+Beyond the hand-authored theme units in `src/content/units/`, a learner can tap **"Generate a new
 unit"** on the Learn screen to grow the course:
 - `api/tutor.js` `type: "generateUnit"`: input `{level, existingTopics, locale}` (existing unit
   titles are passed so the model picks something new), output `{unit, items}` matching
@@ -195,11 +200,11 @@ unit"** on the Learn screen to grow the course:
   response (`gen_<runId>_<originalId>`) and rewrites internal references, so generated content can
   never collide with static content or a previous generation run.
 - `src/lib/generatedContent.js` persists the namespaced result to `localStorage`, **global, not
-  per-profile** — generated units are shared curriculum, the same way the static seed unit is;
+  per-profile** — generated units are shared curriculum, the same way the static theme units are;
   only progress (`learningProgress`) is per-profile.
 - `src/content/course.js`'s lookup functions (`getAllUnits`, `getAllLessons`, `getLesson`,
   `getUnit`, `getReviewExercises`, `learningItem`) transparently merge generated content with the
-  static seed unit, so `LearnScreen`/`LessonScreen`/review all pick it up with no per-caller
+  static theme units, so `LearnScreen`/`LessonScreen`/review all pick it up with no per-caller
   changes. A newly generated unit appears at the end of the path, locked-gated the same way static
   units are (§3.2.1).
 - If the LLM proxy is unavailable or over its free-tier quota, "Generate a new unit" shows the same
@@ -272,25 +277,44 @@ Exactly two static local profiles (the two learners), no accounts, no passwords:
   is the subject being taught and always stays French, regardless of UI locale. A correction's
   short *reason* and its "Why?" **rule** explanation (§3.1.3) are the exception — instructional
   metadata, not graded content, and may be localized; the current `locale` is sent with `type:
-  "turn"`/`"drill"`/`"generateUnit"` requests so Gemini writes `reason`/`rule` in it. Everything
+  "turn"`/`"drill"`/`"generateUnit"` requests so the provider model writes `reason`/`rule` in it. Everything
   else (`examples`, exercise prompts/tiles/options, generated unit content) is always French. The
   two string populations are structurally separate (i18n dictionary keys vs. LLM-proxy-returned
   content) so this can't blur by accident.
 - **Navigation**: no router dependency. The app loads directly into Learn & Practice (default
   landing view — see §4). A small, fixed set of top-level screens (Learn / Lesson / Call /
-  Historique / Objectif TEF / Progrès, plus the profile picker once built) is switched via React
-  state in a top-level context — not URL-based routing.
+  Historique / Objectif TEF / Progrès / Réglages) is switched via React state in a top-level
+  context — not URL-based routing.
 - **Voice**:
   - STT: Web `SpeechRecognition` API, French locale (`fr-FR` or `fr-CA`), Chrome/Edge only.
   - TTS: Web `speechSynthesis` API, pick the best available French voice.
   - Wrapped behind a single hook (`useVoiceCall`) so the rest of the app never touches the raw
     browser APIs directly, and so unsupported browsers get one clear "use Chrome" message instead
     of scattered failures.
-- **LLM**: a free-tier hosted API (Google Gemini free tier). Called through **one small serverless
-  function** (`api/tutor.js`) that holds the API key server-side; the client never embeds the key.
-  This function is the only "backend" the app has — no server framework, no database.
-  - Request types, all sharing one Gemini JSON-mode helper with the same bounding/timeout/
-    error-code conventions:
+- **LLM**: a choose-your-provider setup fronted by **one small serverless function** (`api/tutor.js`)
+  — the only "backend" the app has (no server framework, no database). **Groq is the default
+  provider** (free tier, fast); Anthropic/Claude, OpenAI, Google Gemini, and any OpenAI-compatible
+  custom endpoint (base URL + model) are selectable from the **Settings screen** (a standard sidebar
+  screen alongside Learn/Call/Progress, reachable from `AppSidebar`). The proxy owns each
+  provider's URL/model (`PROVIDERS`/`PROVIDER_MODELS` in `api/tutor.js`) — the client never sends
+  more than a provider id in the request payload. In dev and preview the handler is served **inside
+  the Vite process itself** (`tutorApiPlugin` in `vite.config.js` mounts `/api/tutor` — it parses
+  the JSON body and shims Node's `res` with the Express-style `status()`/`json()` the handler uses),
+  so no separate server process is needed; a deployment that hosts the handler natively just runs
+  the same plain `(req, res)` export. Keys work on a two-track model:
+  - **App/development key**: lives in `.env` per provider (`GROQ_API_KEY`, `GEMINI_API_KEY`,
+    `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`), read server-side, never bundled into the client.
+  - **Bring-your-own-key**: a learner can type their own key into the Settings screen; it's stored
+    in that browser's `localStorage` (`src/lib/settings.js`) and sent with each `/api/tutor`
+    request (`src/lib/llm.js` `tutorRequest` is the single fetch wrapper) so the proxy can route
+    it to the chosen provider. This is the deliberate, learner-chosen exception to "keys stay
+    server-side" — the value is their own secret, never committed or logged.
+  - Every request to the proxy (all six types below) goes through `callLLM`, which shapes the
+    JSON-mode payload per provider — Groq goes through the official **`openai` SDK**
+    (`client.responses.create` against `https://api.groq.com/openai/v1`, reading
+    `response.output_text`; a client is built per call with the resolved key), Gemini via
+    `generateContent`, Anthropic via `/v1/messages`, and the OpenAI-compatible `chat/completions`
+    shape shared by the openai/custom providers:
     - `type: "turn"` — the tutor's next conversational turn given the transcript + optional
       `topic`/`mode`/`scenarioId` (fixed ids mapped server-side to French labels/scenario text,
       never raw client text, so none can be used to inject the system prompt) and
@@ -310,18 +334,23 @@ Exactly two static local profiles (the two learners), no accounts, no passwords:
       matching `course.js`'s unit/lesson/learningItem/exercise shapes including tap-only exercise
       content; validated server-side before being returned (malformed generations are rejected as
       `llm_unavailable`, never passed through half-broken).
+    - `type: "test"` — the Settings screen's "Test connection" button: a zero-content JSON ping
+      (`{"status":"ok"}`) through the learner's chosen provider + key (or `.env` fallback), so the
+      provider/key/config match is confirmed with a concrete good/bad/quota signal *before* relying
+      on it, instead of discovering it on a real call.
   - Still not built: in-call guidance (rephrase/hint) when the learner is stuck (§3.1.1 —
     deliberately deferred).
-  - A Gemini `429` (free-tier quota exhausted) is surfaced as a distinct `quota_exceeded` error code
+  - A provider `429` (quota/rate limit hit) is surfaced as a distinct `quota_exceeded` error code
     (vs. a generic `llm_unavailable`), so the client can show a specific "come back tomorrow"
-    message (§7).
+    message (§7) regardless of which provider is selected.
 - **Word/sentence audio**: `speechSynthesis.speak()` directly on the clicked word or sentence
   string — no pre-recorded audio files, no TTS dependency beyond the browser API already used for
   call replies.
-- **Lesson content**: the seed course unit is static data (`src/content/course.js`), written once
-  by hand — not fetched from a CMS or database. AI-generated units (§3.2.6) extend this at runtime
-  but are still stored client-side (`generatedContent.js`), not in a database — this app has no
-  database at all.
+- **Lesson content**: the course's fifteen hand-authored units (Expressing Opinions + the fourteen
+  official TEF themes, §3.2.1) are static data — one module per unit under `src/content/units/`,
+  assembled into the course by `src/content/course.js` — written once by hand, not fetched from a
+  CMS or database. AI-generated units (§3.2.6) extend this at runtime but are still stored
+  client-side (`generatedContent.js`), not in a database — this app has no database at all.
 - **Learning engine** (§3.2.4): `src/lib/learningEngine/` holds mastery calculation, review
   scheduling, generated-unit id-namespacing, and answer evaluation as plain functions with no React
   and no I/O — the architecture rule "don't put learning logic inside components" is honored by a

@@ -91,7 +91,7 @@ export default function ObjectifScreen({ active, onNavigate }) {
       : `${t(`call.mode.${mode}`)} — ${scenario?.[locale] ?? scenario?.en ?? ''}`
 
   return (
-    <div className="flex min-h-svh w-full bg-background">
+    <div className="flex h-svh w-full overflow-hidden bg-background">
       <AppSidebar active={active} onNavigate={onNavigate} />
 
       <main className="flex min-w-0 flex-1 flex-col overflow-y-auto">

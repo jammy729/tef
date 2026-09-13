@@ -11,7 +11,7 @@ const NAV_ITEMS = [
   { icon: History, labelKey: 'nav.historique', view: 'historique' },
   { icon: BarChart3, labelKey: 'nav.progress', view: 'progress' },
   { icon: GraduationCap, labelKey: 'nav.objectif', view: 'objectif' },
-  { icon: Settings, labelKey: 'nav.settings' },
+  { icon: Settings, labelKey: 'nav.settings', view: 'settings' },
 ]
 
 // ponytail: target level is fixed at B2 → C1 (spec's TEF Canada framing) — only the % is real,
@@ -22,7 +22,7 @@ export default function AppSidebar({ active, onNavigate }) {
   const pct = goalPercent(getSessions(profile.id))
 
   return (
-    <aside className="hidden w-64 shrink-0 flex-col justify-between border-r border-border bg-sidebar px-4 py-6 md:flex">
+    <aside className="hidden h-full w-64 shrink-0 flex-col justify-between overflow-y-auto border-r border-border bg-sidebar px-4 py-6 md:flex">
       <div className="flex flex-col gap-6">
         <button
           type="button"

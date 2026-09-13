@@ -66,7 +66,7 @@ export default function CallScreen({ active, onNavigate, callConfig }) {
   }
 
   return (
-    <div className="flex min-h-svh w-full bg-background">
+    <div className="flex h-svh w-full overflow-hidden bg-background">
       <AppSidebar active={active} onNavigate={onNavigate} />
 
       <main className="flex min-w-0 flex-1 flex-col">

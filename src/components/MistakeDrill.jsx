@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useLocale } from '../lib/i18n/LocaleContext'
 import { Button } from './ui/button'
 import ChoiceBank from './exercises/ChoiceBank'
+import { tutorRequest } from '../lib/llm'
 import { llmErrorKey } from '../lib/errors'
 import { categoryInfo } from '../lib/rubric'
 
@@ -18,22 +19,14 @@ export default function MistakeDrill({ category, onClose }) {
 
   useEffect(() => {
     let cancelled = false
-    fetch('/api/tutor', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type: 'drill', category, locale }),
-    })
-      .then((res) => res.json().catch(() => ({})).then((data) => ({ ok: res.ok, data })))
+    tutorRequest({ type: 'drill', category, locale })
       .then(({ ok, data }) => {
         if (cancelled) return
-        if (!ok || data.error || !data.exercises?.length) {
+        if (!ok || !data.exercises?.length) {
           setError(data.error ?? 'llm_unavailable')
           return
         }
         setExercises(data.exercises)
-      })
-      .catch(() => {
-        if (!cancelled) setError('llm_unavailable')
       })
     return () => {
       cancelled = true

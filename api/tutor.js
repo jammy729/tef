@@ -1,106 +1,176 @@
-// Single LLM proxy endpoint (spec §5) — request-type-driven, holds the API key server-side.
-// Request types: "turn" (next conversational reply + optional inline correction, themed toward
-// the learner's mastered expressions), "score" (end-of-call transcript → TEF rubric scores),
-// "translate" (Learn interactive text: a word/sentence → English gloss), "drill" (Mistake Bank:
-// a weak category → fresh tap-only exercises), and "generateUnit" (Learn & Practice: grow the
+// Single LLM proxy endpoint (spec §5) — request-type-driven, routes to the learner's chosen AI
+// provider. Request types: "turn" (next conversational reply + optional inline correction, themed
+// toward the learner's mastered expressions), "score" (end-of-call transcript → TEF rubric
+// scores), "translate" (Learn interactive text: a word/sentence → English gloss), "drill" (Mistake
+// Bank: a weak category → fresh tap-only exercises), and "generateUnit" (Learn & Practice: grow the
 // curriculum with a new AI-generated unit).
 
-import { TASK_A_SCENARIOS, TASK_B_SCENARIOS } from '../src/content/scenarios.js'
+import OpenAI from "openai";
+import {
+  TASK_A_SCENARIOS,
+  TASK_B_SCENARIOS,
+} from "../src/content/scenarios.js";
 
+// Provider registry (spec §5): the server decides URL/model per provider — the client never sends
+// more than a provider id and, for bring-your-own-key (settings screen), the key + a custom
+// endpoint. `envKey` is the server-side fallback for deployments that keep a key in `.env` instead
+// of entering one in Settings. Groq is the default provider. The `custom` provider has no env
+// fallback — it exists precisely to use the learner's own endpoint/key from Settings.
 const GEMINI_URL =
-  'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent'
+  "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
+const GROQ_RESPONSES_URL = "https://api.groq.com/openai/v1";
+const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
+const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
 
-const MAX_TURNS = 20
-const MAX_TURN_CHARS = 500
-const MAX_TRANSLATE_CHARS = 300
-const MAX_EXPRESSION_CHARS = 60
-const MAX_EXPRESSIONS = 5
+const PROVIDERS = {
+  groq: "GROQ_API_KEY",
+  gemini: "GEMINI_API_KEY",
+  anthropic: "ANTHROPIC_API_KEY",
+  openai: "OPENAI_API_KEY",
+  custom: "", // no .env fallback — custom always needs a bring-your-own key
+};
+
+const PROVIDER_MODELS = {
+  groq: "openai/gpt-oss-20b",
+  gemini: "gemini-2.5-flash",
+  anthropic: "claude-haiku-4-5",
+  openai: "gpt-4o-mini",
+};
+
+const DEFAULT_PROVIDER = "groq";
+const MAX_API_KEY_CHARS = 256;
+const MAX_BASE_URL_CHARS = 256;
+const MAX_MODEL_CHARS = 100;
+
+// Validates the client-supplied provider config and normalizes it; anything unknown falls back to
+// the default provider. The API key is the learner's own bring-your-own-key secret when present,
+// otherwise the proxy falls back to its .env key for that provider.
+function providerConfig(body) {
+  const provider = Object.hasOwn(PROVIDERS, body?.provider)
+    ? body.provider
+    : DEFAULT_PROVIDER;
+  const apiKey =
+    typeof body?.apiKey === "string"
+      ? body.apiKey.trim().slice(0, MAX_API_KEY_CHARS)
+      : "";
+  let baseUrl = "";
+  let model = "";
+  if (provider === "custom") {
+    if (typeof body?.baseUrl === "string" && /^https:\/\//.test(body.baseUrl)) {
+      baseUrl = body.baseUrl
+        .trim()
+        .slice(0, MAX_BASE_URL_CHARS)
+        .replace(/\/+$/, "");
+    }
+    if (typeof body?.model === "string")
+      model = body.model.trim().slice(0, MAX_MODEL_CHARS);
+  }
+  return { provider, apiKey, baseUrl, model };
+}
+
+const MAX_TURNS = 20;
+const MAX_TURN_CHARS = 500;
+const MAX_TRANSLATE_CHARS = 300;
+const MAX_EXPRESSION_CHARS = 60;
+const MAX_EXPRESSIONS = 5;
 
 // Fixed id → French label map so a client-supplied `topic` id only ever selects a known,
 // server-controlled phrase — never interpolates raw client text into the system prompt.
 const TOPIC_LABELS = {
   immigration: "un entretien avec un agent d'immigration canadien",
-  daily: 'la vie quotidienne (marché, rendez-vous, petites conversations)',
-  professional: 'un contexte professionnel (réunion, appel client, présentation)',
+  daily: "la vie quotidienne (marché, rendez-vous, petites conversations)",
+  professional:
+    "un contexte professionnel (réunion, appel client, présentation)",
   free: "un sujet libre de ton choix",
-}
+};
 
 const KNOWN_CATEGORIES = [
-  'gender_agreement',
-  'subjunctive',
-  'passe_compose_imparfait',
-  'pronunciation',
-  'vocabulary',
-  'spelling',
-]
+  "gender_agreement",
+  "subjunctive",
+  "passe_compose_imparfait",
+  "pronunciation",
+  "vocabulary",
+  "spelling",
+];
 
 // `reason`/`rule` are instructional metadata, not graded TEF content (spec §5 i18n boundary) —
 // they're written in the learner's current UI locale. Everything else (examples, practice
 // sentences, corrected forms) is always French.
 function metaLanguage(locale) {
-  return locale === 'fr' ? 'français' : 'anglais'
+  return locale === "fr" ? "français" : "anglais";
 }
 
 const CORRECTION_SCHEMA_NOTE = `Le champ "correction" (quand il n'est pas null) doit avoir la forme :
 {"said": "ce que l'apprenant a dit", "correction": "la forme correcte", "reason": "explication courte", "category": "une des catégories ci-dessus", "rule": "la règle de grammaire en une phrase", "examples": ["2-3 phrases françaises complètes qui illustrent cette règle"], "practice": {"prompt": "une phrase française à trous illustrant la même règle, ex. 'Les enfants ___ (pouvoir) jouer dehors.'", "answer": "la réponse attendue", "options": ["la réponse attendue", "et 2-3 réponses plausibles mais incorrectes, dans le désordre"]}}
-L'apprenant choisit sa réponse parmi "options" — il ne tape jamais de texte.`
+L'apprenant choisit sa réponse parmi "options" — il ne tape jamais de texte.`;
 
 function findScenario(list, scenarioId) {
-  return list.find((s) => s.id === scenarioId) ?? null
+  return list.find((s) => s.id === scenarioId) ?? null;
 }
 
 // mode: "free" (default) | "taskA" | "taskB" | "mock". scenarioId only means anything for
 // taskA/taskB/mock, and is only ever used to look up a fixed server-side scenario — never
 // interpolated as raw client text, same rule as `topic`.
 function modeLines(mode, scenarioId) {
-  if (mode === 'taskA' || mode === 'mock') {
-    const scenario = findScenario(TASK_A_SCENARIOS, scenarioId) ?? TASK_A_SCENARIOS[0]
+  if (mode === "taskA" || mode === "mock") {
+    const scenario =
+      findScenario(TASK_A_SCENARIOS, scenarioId) ?? TASK_A_SCENARIOS[0];
     const taskALine = `Tâche A (obtenir des informations) : joue le rôle de l'interlocuteur pour ce
 scénario, sans sortir du personnage : "${scenario.fr}". L'apprenant doit te poser des questions pour
 obtenir des informations ou résoudre la situation — laisse-le mener la conversation en posant les
-questions, ne les pose pas à sa place.`
-    if (mode === 'taskA') return taskALine
+questions, ne les pose pas à sa place.`;
+    if (mode === "taskA") return taskALine;
     // mock: Task A for the first few exchanges, then Task B — judge roughly from transcript length.
     // ponytail: only one scenarioId is threaded through per call, so the Task B half of a mock
     // exam is always TASK_B_SCENARIOS[0] rather than a second random draw — fine for an MVP mock
     // mode, revisit if mock exams need two independently-randomized scenarios.
-    const scenarioB = findScenario(TASK_B_SCENARIOS, scenarioId) ?? TASK_B_SCENARIOS[0]
+    const scenarioB =
+      findScenario(TASK_B_SCENARIOS, scenarioId) ?? TASK_B_SCENARIOS[0];
     return `${taskALine}
 
 Ceci est un EXAMEN BLANC chronométré : après environ 4-5 échanges sur ce premier scénario, passe à
 la Tâche B — annonce la transition, puis prends la position contraire à l'apprenant sur : "${scenarioB.fr}"
 et pousse-le à défendre son opinion. Pendant tout l'examen, ne corrige AUCUNE erreur (mets toujours
 "correction" à null) et ne donne aucune aide si l'apprenant hésite — c'est un examen, pas un
-entraînement.`
+entraînement.`;
   }
-  if (mode === 'taskB') {
-    const scenario = findScenario(TASK_B_SCENARIOS, scenarioId) ?? TASK_B_SCENARIOS[0]
+  if (mode === "taskB") {
+    const scenario =
+      findScenario(TASK_B_SCENARIOS, scenarioId) ?? TASK_B_SCENARIOS[0];
     return `Tâche B (défendre un point de vue) : prends la position contraire à celle de l'apprenant
 sur cette affirmation : "${scenario.fr}". Pousse-le poliment à défendre et justifier son opinion
-(joue l'avocat du diable), sans jamais être agressif.`
+(joue l'avocat du diable), sans jamais être agressif.`;
   }
-  return ''
+  return "";
 }
 
 // masteredExpressions: a short list of French phrases the learner has already mastered in Learn &
 // Practice (spec §3.2.6) — only ever a list of plain strings sourced from our own closed
 // LEARNING_ITEMS/generated-content set (never arbitrary client text), capped defensively anyway.
 function masteredExpressionsLine(masteredExpressions) {
-  if (!Array.isArray(masteredExpressions) || masteredExpressions.length === 0) return ''
+  if (!Array.isArray(masteredExpressions) || masteredExpressions.length === 0)
+    return "";
   const safe = masteredExpressions
-    .filter((e) => typeof e === 'string')
+    .filter((e) => typeof e === "string")
     .slice(0, MAX_EXPRESSIONS)
-    .map((e) => e.slice(0, MAX_EXPRESSION_CHARS))
-  if (!safe.length) return ''
-  return `L'apprenant maîtrise déjà ces expressions françaises : ${safe.join(', ')}. Sans forcer ni
-transformer la conversation en quiz, cherche des occasions naturelles de le laisser les utiliser.`
+    .map((e) => e.slice(0, MAX_EXPRESSION_CHARS));
+  if (!safe.length) return "";
+  return `L'apprenant maîtrise déjà ces expressions françaises : ${safe.join(", ")}. Sans forcer ni
+transformer la conversation en quiz, cherche des occasions naturelles de le laisser les utiliser.`;
 }
 
-function turnSystemPrompt(topic, mode, scenarioId, locale, masteredExpressions) {
-  const topicLine = topic && TOPIC_LABELS[topic]
-    ? `Le thème imposé pour cet appel est : ${TOPIC_LABELS[topic]}.`
-    : ''
-  const taskLine = modeLines(mode, scenarioId)
+function turnSystemPrompt(
+  topic,
+  mode,
+  scenarioId,
+  locale,
+  masteredExpressions,
+) {
+  const topicLine =
+    topic && TOPIC_LABELS[topic]
+      ? `Le thème imposé pour cet appel est : ${TOPIC_LABELS[topic]}.`
+      : "";
+  const taskLine = modeLines(mode, scenarioId);
   return `Tu es Camille, une tutrice de français sympathique et patiente qui aide un apprenant à se
 préparer pour le TEF (Test d'Évaluation de Français). Parle uniquement en français, adapte ton
 niveau de langue à celui de l'apprenant, et garde tes réponses courtes (2-3 phrases) comme dans une
@@ -114,14 +184,14 @@ Si l'apprenant fait une erreur significative de grammaire, de prononciation (dé
 ou de vocabulaire, corrige-la brièvement et naturellement dans ta réponse parlée, puis décris-la
 aussi dans le champ structuré "correction". Ne signale PAS les petites erreurs à chaque tour —
 seulement les erreurs qui valent la peine d'être notées. La catégorie doit être l'une de :
-${KNOWN_CATEGORIES.join(', ')}.
+${KNOWN_CATEGORIES.join(", ")}.
 
 ${CORRECTION_SCHEMA_NOTE}
 Écris les champs "reason" et "rule" en ${metaLanguage(locale)}. Écris "examples", "practice.prompt"
 et "practice.answer" toujours en français, quelle que soit la langue de "reason"/"rule".
 
 Réponds UNIQUEMENT avec un objet JSON de la forme :
-{"reply": "ta réponse parlée en français", "correction": null ou {...comme décrit ci-dessus}}`
+{"reply": "ta réponse parlée en français", "correction": null ou {...comme décrit ci-dessus}}`;
 }
 
 const SCORE_SYSTEM_PROMPT = `Tu es un évaluateur TEF. On te donne la transcription complète d'un
@@ -130,15 +200,15 @@ de l'APPRENANT uniquement selon les 5 dimensions du TEF, chacune notée de 0 à 
 taskAchievement, fluency, grammar, vocabulary, coherence.
 
 Identifie aussi jusqu'à 3 catégories d'erreurs récurrentes (focusAreas, parmi :
-${KNOWN_CATEGORIES.join(', ')}), jusqu'à 3 points forts (strengths, courtes phrases en français), et
+${KNOWN_CATEGORIES.join(", ")}), jusqu'à 3 points forts (strengths, courtes phrases en français), et
 jusqu'à 3 suggestions de vocabulaire (vocabSuggestions, courtes phrases en français).
 
 Réponds UNIQUEMENT avec un objet JSON de la forme :
-{"scores": {"taskAchievement": 0-5, "fluency": 0-5, "grammar": 0-5, "vocabulary": 0-5, "coherence": 0-5}, "focusAreas": [...], "strengths": [...], "vocabSuggestions": [...]}`
+{"scores": {"taskAchievement": 0-5, "fluency": 0-5, "grammar": 0-5, "vocabulary": 0-5, "coherence": 0-5}, "focusAreas": [...], "strengths": [...], "vocabSuggestions": [...]}`;
 
 const TRANSLATE_SYSTEM_PROMPT = `Tu traduis du français vers l'anglais pour un apprenant du TEF. On
 te donne un mot ou une courte phrase en français. Réponds UNIQUEMENT avec un objet JSON de la forme
-{"translation": "traduction anglaise concise et naturelle"}.`
+{"translation": "traduction anglaise concise et naturelle"}.`;
 
 function drillSystemPrompt(category, locale) {
   return `Tu es un professeur de français qui crée des exercices ciblés pour le TEF. L'apprenant a
@@ -150,22 +220,22 @@ difficulté. Un indice court ("hint") est optionnel ; écris-le en ${metaLanguag
 phrases, réponses et distracteurs restent toujours en français.
 
 Réponds UNIQUEMENT avec un objet JSON de la forme :
-{"exercises": [{"prompt": "...", "answer": "...", "distractors": ["...", "...", "..."], "hint": "..."}]}`
+{"exercises": [{"prompt": "...", "answer": "...", "distractors": ["...", "...", "..."], "hint": "..."}]}`;
 }
 
 const EXERCISE_SHAPE_NOTE = `Chaque exercice a la forme :
-{"id": "identifiant-court", "learningItemId": "id d'un des learningItems ci-dessus", "type": "multiple_choice" | "fill_blank" | "translation" | "production", "stage": "recognition" | "recall" | "context" | "completion" | "transformation" | "production", "prompt": "consigne affichée", "content": {...selon le type}, "answer": "réponse attendue (chaîne, ou tableau de réponses acceptées)", "explanation": "pourquoi c'est correct, en ${'{{META_LANGUAGE}}'}"}
+{"id": "identifiant-court", "learningItemId": "id d'un des learningItems ci-dessus", "type": "multiple_choice" | "fill_blank" | "translation" | "production", "stage": "recognition" | "recall" | "context" | "completion" | "transformation" | "production", "prompt": "consigne affichée", "content": {...selon le type}, "answer": "réponse attendue (chaîne, ou tableau de réponses acceptées)", "explanation": "pourquoi c'est correct, en ${"{{META_LANGUAGE}}"}"}
 
 L'apprenant ne tape JAMAIS de texte — chaque type a un "content" adapté à une interaction tactile :
 - "multiple_choice" : {"options": ["...", "...", "...", "..."]} — "answer" est l'une des options exactement.
 - "fill_blank" : {"sentence": "phrase avec ________ à la place du mot manquant", "options": ["...", "...", "...", "..."]} — "answer" est l'une des options.
 - "translation" : {"direction": "en_to_fr" ou "fr_to_en", "options": ["...", "...", "...", "..."]} — "answer" est l'une des options.
-- "production" : {"tiles": ["mot1", "mot2", "...", "mot-distracteur1", "mot-distracteur2"]} (les mots de la bonne phrase, dans le désordre, plus 2-3 mots distracteurs qui n'appartiennent pas à la phrase) — "answer" est la phrase complète correcte, telle qu'elle doit être reconstituée en assemblant les bons "tiles" dans l'ordre.`
+- "production" : {"tiles": ["mot1", "mot2", "...", "mot-distracteur1", "mot-distracteur2"]} (les mots de la bonne phrase, dans le désordre, plus 2-3 mots distracteurs qui n'appartiennent pas à la phrase) — "answer" est la phrase complète correcte, telle qu'elle doit être reconstituée en assemblant les bons "tiles" dans l'ordre.`;
 
 function generateUnitSystemPrompt(level, existingTopics, locale) {
   const existingLine = existingTopics?.length
-    ? `Les unités suivantes existent déjà, choisis un thème TEF différent : ${existingTopics.join(', ')}.`
-    : ''
+    ? `Les unités suivantes existent déjà, choisis un thème TEF différent : ${existingTopics.join(", ")}.`
+    : "";
   return `Tu es un concepteur de programme pour une application d'apprentissage du français façon
 Duolingo, ciblée sur la préparation au TEF (Test d'Évaluation de Français). Crée UNE nouvelle unité
 de niveau ${level}, sur un thème pertinent pour le TEF (vie quotidienne, travail, environnement,
@@ -185,7 +255,7 @@ et l'une de ces formes :
 - Grammaire : {"id": "...", "type": "grammar", "title": "...", "level": "${level}",
   "explanation": "règle en une ou deux phrases", "examples": ["...", "..."], "counterexamples": ["..."]}
 
-${EXERCISE_SHAPE_NOTE.replace('{{META_LANGUAGE}}', metaLanguage(locale))}
+${EXERCISE_SHAPE_NOTE.replace("{{META_LANGUAGE}}", metaLanguage(locale))}
 
 Réponds UNIQUEMENT avec un objet JSON de la forme :
 {"unit": {"id": "id-unite", "title": "titre en anglais", "description": "description en anglais",
@@ -194,70 +264,197 @@ Réponds UNIQUEMENT avec un objet JSON de la forme :
 
 "unit.title", "unit.description", et "lesson.title" sont en ${metaLanguage(locale)} (ce sont des
 titres d'interface, pas du contenu français à apprendre) ; tout le reste en français, sauf les
-champs "meaning"/"explanation"/"hint" déjà notés ci-dessus.`
+champs "meaning"/"explanation"/"hint" déjà notés ci-dessus.`;
 }
 
 function boundTranscript(transcript) {
   return transcript.slice(-MAX_TURNS).map((turn) => ({
-    role: turn.speaker === 'tutor' ? 'model' : 'user',
-    parts: [{ text: String(turn.text ?? '').slice(0, MAX_TURN_CHARS) }],
-  }))
+    role: turn.speaker === "tutor" ? "model" : "user",
+    parts: [{ text: String(turn.text ?? "").slice(0, MAX_TURN_CHARS) }],
+  }));
 }
 
-// Shared Gemini call: JSON-mode structured output, same timeout/error-code conventions for
-// every request type that uses it.
-async function callGemini(systemPrompt, contents) {
-  const apiKey = process.env.GEMINI_API_KEY
-  if (!apiKey) return { error: 'llm_unavailable' }
+// Shared LLM call: JSON-mode structured output, same timeout/error-code conventions for every
+// request type and provider. `cfg` comes from providerConfig(req.body) — provider (+ optional
+// bring-your-own-key from the settings screen). Each provider has its own transport shape:
+// Groq via the official `openai` SDK against its base URL (Responses API), Gemini's generateContent
+// JSON mode, Anthropic's /v1/messages, and the OpenAI-compatible chat-completions shape shared by
+// the openai provider / any custom endpoint.
+async function callLLM(systemPrompt, contents, cfg, { maxTokens = 2048 } = {}) {
+  const apiKey = cfg.apiKey || process.env[PROVIDERS[cfg.provider]];
+  if (!apiKey) return { error: "llm_unavailable" };
+
+  // Groq is called through the `openai` SDK (the intentional dependency): same request the official
+  // docs' snippet sends — Responses API against https://api.groq.com/openai/v1, model passed in,
+  // output read from `.output_text`, which the SDK synthesizes client-side (the raw REST response
+  // does not include it).
+  if (cfg.provider === "groq") {
+    return callGroq(systemPrompt, contents, apiKey, maxTokens);
+  }
 
   try {
-    const geminiRes = await fetch(`${GEMINI_URL}?key=${apiKey}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    let url;
+    let headers;
+    let body;
+
+    if (cfg.provider === "gemini") {
+      url = `${GEMINI_URL}?key=${apiKey}`;
+      headers = { "Content-Type": "application/json" };
+      body = {
         systemInstruction: { parts: [{ text: systemPrompt }] },
         contents,
-        generationConfig: { responseMimeType: 'application/json' },
-      }),
+        generationConfig: { responseMimeType: "application/json" },
+      };
+    } else if (cfg.provider === "anthropic") {
+      url = ANTHROPIC_URL;
+      headers = {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      };
+      body = {
+        model: cfg.model || PROVIDER_MODELS.anthropic,
+        max_tokens: maxTokens,
+        system: systemPrompt,
+        messages: contents.map((c) => ({
+          role: c.role === "model" ? "assistant" : "user",
+          content: String(c.parts?.[0]?.text ?? ""),
+        })),
+      };
+    } else {
+      // openai / custom speak OpenAI's chat-completions shape. Custom providers take their
+      // baseUrl + model from the settings screen, and skip response_format (a custom server may
+      // not support JSON mode — the prompt instruction is enough there).
+      if (cfg.provider === "openai") url = OPENAI_URL;
+      else if (cfg.baseUrl && cfg.model)
+        url = `${cfg.baseUrl}/chat/completions`;
+      else return { error: "llm_unavailable" };
+      headers = {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      };
+      body = {
+        model: cfg.model || PROVIDER_MODELS[cfg.provider],
+        temperature: 0.7,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: systemPrompt },
+          ...contents.map((c) => ({
+            role: c.role === "model" ? "assistant" : "user",
+            content: String(c.parts?.[0]?.text ?? ""),
+          })),
+        ],
+      };
+    }
+
+    const res = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(20000),
-    })
+    });
 
-    if (!geminiRes.ok) return { error: geminiRes.status === 429 ? 'quota_exceeded' : 'llm_unavailable' }
+    if (!res.ok) {
+      // surface the HTTP status so the Settings "test" can distinguish a rejected key (401/403)
+      // from a generic provider failure — the real message stays server-side, only the code leaks.
+      return {
+        error: res.status === 429 ? "quota_exceeded" : "llm_unavailable",
+        status: res.status,
+      };
+    }
 
-    const data = await geminiRes.json()
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text
-    if (!text) return { error: 'llm_unavailable' }
+    const data = await res.json();
+    const text =
+      cfg.provider === "anthropic"
+        ? data.content?.[0]?.text
+        : cfg.provider === "gemini"
+          ? data.candidates?.[0]?.content?.parts?.[0]?.text
+          : data.choices?.[0]?.message?.content;
+    if (typeof text !== "string" || !text.trim())
+      return { error: "llm_unavailable" };
 
     try {
-      return { data: JSON.parse(text) }
+      return { data: JSON.parse(text) };
     } catch {
-      return { error: 'llm_unavailable' }
+      return { error: "llm_unavailable" };
     }
   } catch {
-    return { error: 'llm_unavailable' }
+    return { error: "llm_unavailable" };
+  }
+}
+
+// The `openai` SDK call Groq is routed through (spec §5). Requests use JSON mode
+// (`text.format.json_object`), gpt-oss reasoning-model fields (`max_output_tokens`, not
+// `max_tokens`, + `reasoning: {effort}`), and the same 20s timeout / error-code conventions as the
+// fetch-based providers. A client is built per call with that request's resolved key — the SDK
+// validates credentials at construction, so a shared keyless instance would throw.
+async function callGroq(systemPrompt, contents, apiKey, maxTokens) {
+  const client = new OpenAI({
+    apiKey,
+    baseURL: GROQ_RESPONSES_URL,
+    timeout: 20000,
+    maxRetries: 0,
+  });
+  try {
+    const response = await client.responses.create({
+      model: PROVIDER_MODELS.groq,
+      input: [
+        { role: "system", content: systemPrompt },
+        ...contents.map((c) => ({
+          role: c.role === "model" ? "assistant" : "user",
+          content: String(c.parts?.[0]?.text ?? ""),
+        })),
+      ],
+      text: { format: { type: "json_object" } },
+      max_output_tokens: maxTokens,
+      temperature: 0.7,
+      reasoning: { effort: "low" },
+    });
+    const text = response.output_text;
+    if (typeof text !== "string" || !text.trim())
+      return { error: "llm_unavailable" };
+    try {
+      return { data: JSON.parse(text) };
+    } catch {
+      return { error: "llm_unavailable" };
+    }
+  } catch (err) {
+    const status = err?.status;
+    return {
+      error: status === 429 ? "quota_exceeded" : "llm_unavailable",
+      status,
+    };
   }
 }
 
 function safePractice(practice) {
-  if (!practice || typeof practice !== 'object') return null
-  const prompt = String(practice.prompt ?? '')
-  const answer = String(practice.answer ?? '')
-  const options = Array.isArray(practice.options) ? practice.options.map(String) : []
-  if (!prompt || !answer) return null
-  return { prompt, answer, options: options.includes(answer) ? options : [...options, answer] }
+  if (!practice || typeof practice !== "object") return null;
+  const prompt = String(practice.prompt ?? "");
+  const answer = String(practice.answer ?? "");
+  const options = Array.isArray(practice.options)
+    ? practice.options.map(String)
+    : [];
+  if (!prompt || !answer) return null;
+  return {
+    prompt,
+    answer,
+    options: options.includes(answer) ? options : [...options, answer],
+  };
 }
 
 function safeCorrection(correction) {
-  if (!correction || typeof correction !== 'object') return null
+  if (!correction || typeof correction !== "object") return null;
   return {
-    said: String(correction.said ?? ''),
-    correction: String(correction.correction ?? ''),
-    reason: String(correction.reason ?? ''),
+    said: String(correction.said ?? ""),
+    correction: String(correction.correction ?? ""),
+    reason: String(correction.reason ?? ""),
     category: correction.category,
-    rule: String(correction.rule ?? ''),
-    examples: Array.isArray(correction.examples) ? correction.examples.map(String) : [],
+    rule: String(correction.rule ?? ""),
+    examples: Array.isArray(correction.examples)
+      ? correction.examples.map(String)
+      : [],
     practice: safePractice(correction.practice),
-  }
+  };
 }
 
 // ponytail: shallow structural validation only (right fields, right types) — doesn't verify e.g.
@@ -265,16 +462,19 @@ function safeCorrection(correction) {
 // just renders as an odd-looking exercise rather than crashing; tightening this needs a real
 // per-type schema validator if generation quality turns out to be a problem in practice.
 function safeUnit(raw) {
-  if (!raw?.unit || typeof raw.unit !== 'object') return null
-  const unit = raw.unit
-  if (!unit.id || !unit.title || !Array.isArray(unit.lessons)) return null
-  return { unit, items: raw.items && typeof raw.items === 'object' ? raw.items : {} }
+  if (!raw?.unit || typeof raw.unit !== "object") return null;
+  const unit = raw.unit;
+  if (!unit.id || !unit.title || !Array.isArray(unit.lessons)) return null;
+  return {
+    unit,
+    items: raw.items && typeof raw.items === "object" ? raw.items : {},
+  };
 }
 
 export default async function handler(req, res) {
-  if (req.method !== 'POST') {
-    res.status(405).json({ error: 'method_not_allowed' })
-    return
+  if (req.method !== "POST") {
+    res.status(405).json({ error: "method_not_allowed" });
+    return;
   }
 
   const {
@@ -289,109 +489,155 @@ export default async function handler(req, res) {
     locale,
     level,
     existingTopics,
-  } = req.body ?? {}
-  const safeLocale = locale === 'fr' ? 'fr' : 'en'
+  } = req.body ?? {};
+  const llm = providerConfig(req.body);
+  const safeLocale = locale === "fr" ? "fr" : "en";
 
-  if (!['turn', 'score', 'translate', 'drill', 'generateUnit'].includes(type)) {
-    res.status(400).json({ error: 'unknown_request_type' })
-    return
+  if (
+    !["turn", "score", "translate", "drill", "generateUnit", "test"].includes(
+      type,
+    )
+  ) {
+    res.status(400).json({ error: "unknown_request_type" });
+    return;
   }
 
-  if (type === 'translate') {
-    if (typeof text !== 'string' || !text.trim()) {
-      res.status(400).json({ error: 'invalid_text' })
-      return
+  if (type === "translate") {
+    if (typeof text !== "string" || !text.trim()) {
+      res.status(400).json({ error: "invalid_text" });
+      return;
     }
-    const bounded = text.slice(0, MAX_TRANSLATE_CHARS)
-    const { data, error } = await callGemini(TRANSLATE_SYSTEM_PROMPT, [
-      { role: 'user', parts: [{ text: bounded }] },
-    ])
-    if (error || typeof data?.translation !== 'string') {
-      res.status(502).json({ error: error ?? 'llm_unavailable' })
-      return
+    const bounded = text.slice(0, MAX_TRANSLATE_CHARS);
+    const { data, error } = await callLLM(
+      TRANSLATE_SYSTEM_PROMPT,
+      [{ role: "user", parts: [{ text: bounded }] }],
+      llm,
+      { maxTokens: 512 },
+    );
+    if (error || typeof data?.translation !== "string") {
+      res.status(502).json({ error: error ?? "llm_unavailable" });
+      return;
     }
-    res.status(200).json({ translation: data.translation })
-    return
+    res.status(200).json({ translation: data.translation });
+    return;
   }
 
-  if (type === 'drill') {
+  // type === 'test' — Settings screen's "Test connection": prove the selected provider + key (or
+  // .env fallback) can reach the model and return JSON, with no LLM content involved. Same route as
+  // every other request (provider taken from req.body via providerConfig / llmRequestMeta), so it
+  // also validates the custom provider's baseUrl + model.
+  if (type === "test") {
+    const { error, status } = await callLLM(
+      'Tu réponds uniquement avec l\'objet JSON {"status":"ok"}.',
+      [{ role: "user", parts: [{ text: "ping" }] }],
+      llm,
+      { maxTokens: 64 },
+    );
+    if (error) {
+      res
+        .status(502)
+        .json({
+          error: status === 401 || status === 403 ? "auth_failed" : error,
+        });
+      return;
+    }
+    res.status(200).json({ ok: true });
+    return;
+  }
+
+  if (type === "drill") {
     if (!KNOWN_CATEGORIES.includes(category)) {
-      res.status(400).json({ error: 'invalid_category' })
-      return
+      res.status(400).json({ error: "invalid_category" });
+      return;
     }
-    const { data, error } = await callGemini(drillSystemPrompt(category, safeLocale), [
-      { role: 'user', parts: [{ text: category }] },
-    ])
+    const { data, error } = await callLLM(
+      drillSystemPrompt(category, safeLocale),
+      [{ role: "user", parts: [{ text: category }] }],
+      llm,
+    );
     if (error || !Array.isArray(data?.exercises)) {
-      res.status(502).json({ error: error ?? 'llm_unavailable' })
-      return
+      res.status(502).json({ error: error ?? "llm_unavailable" });
+      return;
     }
     const exercises = data.exercises
       .map((e) => ({
-        prompt: String(e?.prompt ?? ''),
-        answer: String(e?.answer ?? ''),
+        prompt: String(e?.prompt ?? ""),
+        answer: String(e?.answer ?? ""),
         options: Array.isArray(e?.distractors)
-          ? [...e.distractors.map(String), String(e?.answer ?? '')].sort(() => Math.random() - 0.5)
+          ? [...e.distractors.map(String), String(e?.answer ?? "")].sort(
+              () => Math.random() - 0.5,
+            )
           : [],
-        hint: String(e?.hint ?? ''),
+        hint: String(e?.hint ?? ""),
       }))
-      .filter((e) => e.prompt && e.answer && e.options.length > 1)
-    res.status(200).json({ exercises })
-    return
+      .filter((e) => e.prompt && e.answer && e.options.length > 1);
+    res.status(200).json({ exercises });
+    return;
   }
 
-  if (type === 'generateUnit') {
-    const safeLevel = typeof level === 'string' && level.length <= 10 ? level : 'B1'
+  if (type === "generateUnit") {
+    const safeLevel =
+      typeof level === "string" && level.length <= 10 ? level : "B1";
     const safeExisting = Array.isArray(existingTopics)
-      ? existingTopics.filter((t) => typeof t === 'string').slice(0, 30).map((t) => t.slice(0, 60))
-      : []
-    const { data, error } = await callGemini(generateUnitSystemPrompt(safeLevel, safeExisting, safeLocale), [
-      { role: 'user', parts: [{ text: `Niveau : ${safeLevel}` }] },
-    ])
-    const unit = safeUnit(data)
+      ? existingTopics
+          .filter((t) => typeof t === "string")
+          .slice(0, 30)
+          .map((t) => t.slice(0, 60))
+      : [];
+    const { data, error } = await callLLM(
+      generateUnitSystemPrompt(safeLevel, safeExisting, safeLocale),
+      [{ role: "user", parts: [{ text: `Niveau : ${safeLevel}` }] }],
+      llm,
+      { maxTokens: 8192 },
+    );
+    const unit = safeUnit(data);
     if (error || !unit) {
-      res.status(502).json({ error: error ?? 'llm_unavailable' })
-      return
+      res.status(502).json({ error: error ?? "llm_unavailable" });
+      return;
     }
-    res.status(200).json(unit)
-    return
+    res.status(200).json(unit);
+    return;
   }
 
   if (!Array.isArray(transcript)) {
-    res.status(400).json({ error: 'invalid_transcript' })
-    return
+    res.status(400).json({ error: "invalid_transcript" });
+    return;
   }
 
-  const contents = boundTranscript(transcript)
+  const contents = boundTranscript(transcript);
 
-  if (type === 'turn') {
-    const safeMode = ['taskA', 'taskB', 'mock'].includes(mode) ? mode : 'free'
+  if (type === "turn") {
+    const safeMode = ["taskA", "taskB", "mock"].includes(mode) ? mode : "free";
     const prompt = turnSystemPrompt(
-      typeof topic === 'string' ? topic : null,
+      typeof topic === "string" ? topic : null,
       safeMode,
-      typeof scenarioId === 'string' ? scenarioId : null,
+      typeof scenarioId === "string" ? scenarioId : null,
       safeLocale,
       masteredExpressions,
-    )
-    const { data, error } = await callGemini(prompt, contents)
-    if (error || typeof data?.reply !== 'string') {
-      res.status(502).json({ error: error ?? 'llm_unavailable' })
-      return
+    );
+    const { data, error } = await callLLM(prompt, contents, llm);
+    if (error || typeof data?.reply !== "string") {
+      res.status(502).json({ error: error ?? "llm_unavailable" });
+      return;
     }
-    res.status(200).json({ reply: data.reply, correction: safeCorrection(data.correction) })
-    return
+    res
+      .status(200)
+      .json({ reply: data.reply, correction: safeCorrection(data.correction) });
+    return;
   }
 
   // type === 'score'
-  const { data, error } = await callGemini(SCORE_SYSTEM_PROMPT, contents)
+  const { data, error } = await callLLM(SCORE_SYSTEM_PROMPT, contents, llm);
   if (error || !data?.scores) {
-    res.status(502).json({ error: error ?? 'llm_unavailable' })
-    return
+    res.status(502).json({ error: error ?? "llm_unavailable" });
+    return;
   }
   res.status(200).json({
     scores: data.scores,
     focusAreas: Array.isArray(data.focusAreas) ? data.focusAreas : [],
     strengths: Array.isArray(data.strengths) ? data.strengths : [],
-    vocabSuggestions: Array.isArray(data.vocabSuggestions) ? data.vocabSuggestions : [],
-  })
+    vocabSuggestions: Array.isArray(data.vocabSuggestions)
+      ? data.vocabSuggestions
+      : [],
+  });
 }

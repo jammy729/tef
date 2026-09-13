@@ -25,7 +25,7 @@ export default function HistoriqueScreen({ active, onNavigate }) {
 
   if (!session) {
     return (
-      <div className="flex min-h-svh w-full bg-background">
+      <div className="flex h-svh w-full overflow-hidden bg-background">
         <AppSidebar active={active} onNavigate={onNavigate} />
         <main className="flex min-w-0 flex-1 flex-col items-center justify-center gap-4 p-10 text-center">
           <h1 className="text-h1">{t('historique.evolution.empty')}</h1>
@@ -49,7 +49,7 @@ export default function HistoriqueScreen({ active, onNavigate }) {
   const streak = getStreakDays(profile.id)
 
   return (
-    <div className="flex min-h-svh w-full bg-background">
+    <div className="flex h-svh w-full overflow-hidden bg-background">
       <AppSidebar active={active} onNavigate={onNavigate} />
 
       <main className="flex min-w-0 flex-1 flex-col overflow-y-auto">

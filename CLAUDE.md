@@ -10,8 +10,7 @@ Package manager is `bun` (see `bun.lock`).
 - `bun run build` — production build
 - `bun run preview` — preview the production build locally
 - `bun run lint` — run oxlint (config: `.oxlintrc.json`, `react` + `oxc` plugins)
-
-There is no test suite yet.
+- `bun test` — run the unit tests (bun's built-in runner, no test framework dependency)
 
 ## Spec-driven development
 
@@ -69,20 +68,48 @@ Key architectural decisions locked in by the spec (see `spec/PRODUCT_SPEC.md` §
 - **Voice is entirely browser-native.** Speech-to-text uses the Web `SpeechRecognition` API and
   playback uses `speechSynthesis` — no third-party speech SDK. This only works in
   Chromium-based browsers (Chrome/Edge); the app must degrade with a clear message elsewhere.
-- **The only "backend" is a single LLM proxy endpoint** (`api/tutor.js`). It exists solely to keep
-  the LLM API key server-side (never bundled into the client) and is one small serverless-style
-  handler, not a server framework. It's request-type-driven, all five types sharing one Gemini
-  JSON-mode helper (`callGemini`): `type: "turn"` (tutor's next reply + an inline structured
-  `correction` — `{said, correction, reason, category, rule, examples, practice: {prompt, answer,
-  options}}`, themed by `topic`/`mode`/`scenarioId` for Task A/B/mock and by `masteredExpressions`
-  from Learn & Practice), `type: "score"` (finished call transcript → rubric
-  scores/focusAreas/strengths/vocabSuggestions), `type: "translate"` (Learn's click-to-hear/gloss
-  interaction), `type: "drill"` (a weak category → fresh tap-only exercises, `options` built
-  server-side, for the Mistake Bank), `type: "generateUnit"` (Learn & Practice: grow the curriculum
-  with a new AI-generated unit, validated server-side before being returned). In-call
-  stuck/guidance detection is specced but not built (nothing in the UI surfaces it) — deliberately
-  kept to one endpoint rather than one per concern. A Gemini `429` maps to a distinct
-  `quota_exceeded` error code so the client can tell quota exhaustion from a generic failure.
+- **The only "backend" is a single LLM proxy endpoint** (`api/tutor.js`). It exists to keep the
+  app's own API key server-side (never bundled into the client) and to front a choose-your-provider
+  setup. It's one small serverless-style handler, not a server framework. It's request-type-driven,
+  all six types sharing one provider-dispatching JSON-mode helper (`callLLM`): `type: "turn"`
+  (tutor's next reply + an inline structured `correction` — `{said, correction, reason, category,
+  rule, examples, practice: {prompt, answer, options}}`, themed by `topic`/`mode`/`scenarioId` for
+  Task A/B/mock and by `masteredExpressions` from Learn & Practice), `type: "score"` (finished call
+  transcript → rubric scores/focusAreas/strengths/vocabSuggestions), `type: "translate"` (Learn's
+  click-to-hear/gloss interaction), `type: "drill"` (a weak category → fresh tap-only exercises,
+  `options` built server-side, for the Mistake Bank), `type: "generateUnit"` (Learn & Practice:
+  grow the curriculum with a new AI-generated unit, validated server-side before being returned),
+  and `type: "test"` (Settings screen's "Test connection" button: a zero-content JSON ping through
+  the learner's selected provider + key/.env fallback, so the match is confirmed before relying on
+  the provider). In-call stuck/guidance detection is specced but not built (nothing in the UI
+  surfaces it) — deliberately kept to one endpoint rather than one per concern. A provider `429`
+  maps to a distinct `quota_exceeded` error code so the client can tell quota exhaustion from a
+  generic failure.
+- **The AI provider is user-selectable (spec §5, Settings screen).** Groq is the default;
+  Anthropic/Claude, OpenAI, Google Gemini, and any OpenAI-compatible custom endpoint are
+  alternatives. The proxy (`api/tutor.js` `PROVIDERS`/`PROVIDER_MODELS`) owns each provider's URL
+  and model — the client never sends more than a provider id, plus the learner's own key when they
+  fill it in (`src/lib/settings.js` `llmRequestMeta`, merged by `src/lib/llm.js` `tutorRequest`,
+  which is the single fetch wrapper every `/api/tutor` call must go through). Each provider also
+  has a `.env` fallback key (`GROQ_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`,
+  `OPENAI_API_KEY`) used when the Settings screen has no key for it; the `custom` provider has no
+  env fallback (it exists precisely to use a learner-supplied endpoint/key). Note the current Groq
+  default is `openai/gpt-oss-20b` called through the official **`openai` SDK** (an explicit,
+  user-chosen dependency, see the production rule below) against Groq's base URL — the same request
+  the SDK docs' example sends: `new OpenAI({ apiKey, baseURL: "https://api.groq.com/openai/v1" })`,
+  `client.responses.create({model, input, text.format: {type: "json_object"}, max_output_tokens,
+  reasoning: {effort: "low"}})`, reading `response.output_text` (the SDK synthesizes that field
+  client-side from `output[]` — the raw REST response does not include it). A client is built per
+  call (the SDK validates credentials at construction, so a shared keyless instance would throw).
+  Before changing the model id, verify it exists on the Groq plans you'd ship to (`curl /v1/models`),
+  the way `llama-3.3-70b-versatile` turned out to 404.
+- **The proxy runs inside Vite's own dev/preview server — no separate process.** `vite.config.js`
+  mounts the Express-style `tutorHandler` at `/api/tutor` through a small plugin
+  (`tutorApiPlugin`: parses `req.body` as JSON and shims Node's bare http `res` with
+  `status()`/`json()`), so `bun run dev` and `bun run preview` serve app + API as one process. The
+  `.env` fallback keys are backfilled into `process.env` from Vite's `loadEnv` so the handler finds
+  them under any runner. Deployment targets that host the handler themselves (a real serverless
+  function) don't use the plugin — the handler signature stays plain `(req, res)` Express-style.
 - **No exercise or practice interaction anywhere in the app accepts typed text.** Every exercise
   (multiple choice, fill-in-the-blank, translation, production) is answered by tapping —
   `ChoiceBank` (chip selection) or `TileBuilder` (ordered word tiles for "build the sentence").
@@ -91,7 +118,11 @@ Key architectural decisions locked in by the spec (see `spec/PRODUCT_SPEC.md` §
   normalize + compare) — don't reintroduce an `<input>`/`<textarea>` into this flow, and don't
   reintroduce an LLM call into answer evaluation.
 - **Lesson content is static data plus an AI-generated extension**, not fetched from a CMS/
-  database — the seed unit is written once under `src/content/course.js` (also home to
+  database — the curriculum is hand-authored once, one module per unit under
+  `src/content/units/` (the "Expressing Opinions" foundation unit plus a unit for every official
+  TEF theme: each 3 lessons — Vocabulaire / Construire des idées / Argumenter — with ~12-15
+  learning items and 18 tap-only exercises), assembled by `src/content/course.js`, a thin
+  assembler that builds `COURSE`/`LEARNING_ITEMS` and exposes the lookup functions. Also home to
   `scenarios.js`'s Task A/B prompts, imported directly by both `ObjectifScreen` and `api/tutor.js`
   so scenario text never drifts between what the learner reads and what the tutor is prompted
   with). AI-generated units (`type: "generateUnit"`) are namespaced by
@@ -99,7 +130,9 @@ Key architectural decisions locked in by the spec (see `spec/PRODUCT_SPEC.md` §
   `src/lib/generatedContent.js` (a separate, global — not per-profile — `localStorage` key, since
   it's shared curriculum, not personal data); `course.js`'s lookup functions merge both sources
   transparently. Still no database — generated content lives in the browser, same as everything
-  else.
+  else. `bun test` runs a shape/referential-integrity suite (`src/content/course.test.js`) that
+  keeps every unit/lesson/item/exercise id unique and every `learningItemId` resoluble — run it
+  after touching any content file.
 - **Styling is Tailwind CSS + shadcn/ui**, themed to `wireframe/design-system.png`'s palette/type
   scale (Fraunces + Inter, self-hosted via `@fontsource-variable/*`). Utility classes for
   layout/spacing, shadcn components (generated into `src/components/ui/`, not installed as an npm
@@ -113,9 +146,17 @@ Key architectural decisions locked in by the spec (see `spec/PRODUCT_SPEC.md` §
 
 ## Production-readiness rules
 
-- **Never let the LLM API key reach the client bundle.** It lives only in `.env` (gitignored,
-  `.env.example` documents the required var name) and is read server-side by the proxy handler. If
-  a new env var is needed, add it to both `.env` and `.env.example`.
+- **Never let the app's own LLM API key reach the client bundle or the repo.** The app's key lives
+  only in `.env` (gitignored; `.env.example` documents the vars) and is read server-side by the
+  proxy handler. If a new env var is needed, add it to both `.env` and `.env.example`. The one
+  deliberate exception is bring-your-own-key: keys a learner types into the **Settings screen** are
+  stored in that browser's `localStorage` (`src/lib/settings.js`) and sent with each request to
+  this app's own `/api/tutor` proxy, which forwards them to the selected provider — never bundled
+  into shipped code, never committed, never logged. Don't write a BYOK key anywhere outside the
+  settings store, and don't send any key to anything other than the proxy.
+- **Settings-screen keys are not course content and are not run through the EN/FR chrome boundary
+  by accident**: the Settings screen is app chrome (i18n via `t()`), but the *values* a learner
+  enters (keys, custom URL/model) are data, not strings — render them raw, never through `t()`.
 - **Validate/bound anything sent to the LLM proxy before it leaves the client**: cap transcript
   length sent per request, and never forward raw unbounded user text as a prompt-injection vector
   into the system prompt — the proxy's system prompt and the learner's transcript must stay in
@@ -147,7 +188,11 @@ Key architectural decisions locked in by the spec (see `spec/PRODUCT_SPEC.md` §
   avoid new deps for speech (Web Speech API), state (React context), and the LLM SDK (plain
   `fetch`) — don't quietly reintroduce them. Tailwind CSS + shadcn/ui (and shadcn's own small
   dependencies: `class-variance-authority`, `clsx`, `tailwind-merge`, `lucide-react`) are the one
-  explicit exception, chosen by the user for styling/components — allowed, don't relitigate.
+  explicit exception for styling/components, and the **`openai` SDK** is a second, narrow one that
+  the user explicitly chose for the **server-side Groq call** in `api/tutor.js` (`callGroq`): it's a
+  proxy-only dependency, never imported by client code, and is the documented way to hit Groq's
+  Responses API (`.responses.create`, `.output_text`). Allowed on that server side only — don't
+  extend it into client code or let it pull in a habit of SDK-per-provider.
 - **Run `bun run lint` clean before considering any change done.** No leftover `console.log`
   debugging output or dead code in committed changes.
 - **Don't commit `.env` or any real API key/secret** — verify `git status`/`git diff` before

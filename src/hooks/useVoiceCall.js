@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { tutorRequest } from '../lib/llm'
 
 const SpeechRecognitionCtor =
   typeof window !== 'undefined' && (window.SpeechRecognition || window.webkitSpeechRecognition)
@@ -79,21 +80,16 @@ export function useVoiceCall(callConfig, locale = 'en', masteredExpressions = []
       setLlmError(null)
       setWaitingForTutor(true)
       try {
-        const res = await fetch('/api/tutor', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            type: 'turn',
-            transcript: nextTranscript,
-            topic,
-            mode,
-            scenarioId,
-            locale,
-            masteredExpressions,
-          }),
+        const { ok, data } = await tutorRequest({
+          type: 'turn',
+          transcript: nextTranscript,
+          topic,
+          mode,
+          scenarioId,
+          locale,
+          masteredExpressions,
         })
-        const data = await res.json().catch(() => ({}))
-        if (!res.ok || data.error) {
+        if (!ok) {
           setLlmError(data.error ?? 'llm_unavailable')
           return null
         }
@@ -180,13 +176,8 @@ export function useVoiceCall(callConfig, locale = 'en', masteredExpressions = []
     setEndingCall(true)
     const durationSec = Math.round((Date.now() - startedAtRef.current) / 1000)
     try {
-      const res = await fetch('/api/tutor', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: 'score', transcript }),
-      })
-      const data = await res.json().catch(() => ({}))
-      if (!res.ok || data.error) {
+      const { ok, data } = await tutorRequest({ type: 'score', transcript })
+      if (!ok) {
         setLlmError(data.error ?? 'llm_unavailable')
         return null
       }

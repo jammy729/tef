@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import { Volume2 } from 'lucide-react'
+import { tutorRequest } from '../lib/llm'
 
 // Module-level cache — translations are cheap/tiny (spec §5) but no need to re-fetch the same
 // word/sentence twice in a session.
@@ -7,19 +8,10 @@ const translationCache = new Map()
 
 async function fetchTranslation(text) {
   if (translationCache.has(text)) return translationCache.get(text)
-  try {
-    const res = await fetch('/api/tutor', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type: 'translate', text }),
-    })
-    const data = await res.json().catch(() => ({}))
-    if (!res.ok || data.error) return null
-    translationCache.set(text, data.translation)
-    return data.translation
-  } catch {
-    return null
-  }
+  const { ok, data } = await tutorRequest({ type: 'translate', text })
+  if (!ok || !data.translation) return null
+  translationCache.set(text, data.translation)
+  return data.translation
 }
 
 function speak(text) {

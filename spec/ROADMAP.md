@@ -267,3 +267,75 @@ per spec v0.3.
 - [x] `bun run lint`/`bun run build` clean, `bun test src/lib/learningEngine` passing (added tests
       for `evaluateProduction` and `importGeneratedUnit`)
 - Spec refs: §3.1.6, §3.2 (all subsections), §5, §6, §7
+
+## Phase 9 — Full TEF theme coverage (hand-authored curriculum)
+Goal: cover the whole official exam, not just the one foundation unit — "Expressing Opinions" plus a
+hand-authored unit for each of the fourteen official TEF themes, all built from the same
+argumentation toolkit and all exercising the same 4 tap-only types. Content moves out of
+`course.js` into one module per unit (`src/content/units/*.js`), structurally identical to
+AI-generated units so both merge transparently (spec §3.2.6); `course.js` becomes a thin assembler.
+- [x] Move the Opinions seed unit into its own module `src/content/units/opinions.js` (unchanged
+      content, same `{ unit, items }` export shape as generated units)
+- [x] Author the 14 official-TEF-theme units in `src/content/units/`: Le travail,
+      L'environnement, Les nouvelles technologies, La santé, L'éducation, La famille, La société,
+      Les médias, La culture, L'économie, Les transports, La consommation, Le sport, La politique —
+      each 3 lessons (Vocabulaire / Construire des idées / Argumenter) with ~12-15 learning items
+      and 18 tap-only exercises, at least one authored `hints` array (spec §3.2.1, §3.2.2)
+- [x] `src/content/course.js` slimmed to an assembler: imports all unit modules, builds
+      `COURSE`/`LEARNING_ITEMS` (Opinions first, then the 14 themes), keeps `getAllUnits`,
+      `getAllLessons`, `getLesson`, `getUnit`, `getReviewExercises`, `learningItem` exports stable
+      and still merging generated content transparently (spec §3.2.6)
+- [x] Shape/referential-integrity tests: `src/content/course.test.js` (bun build-in runner) — unit
+      count/order, unique unit/item ids, every `learningItemId` on lessons *and* exercises
+      resoluble, every exercise tap-only (`options` or `tiles`), non-empty ids/explanations
+- [x] `bun run lint`/`bun run build`/`bun test` clean
+- Spec refs: §3.2.1, §3.2.2, §3.2.6, §5
+
+## Phase 10 — Choose-your-LLM-provider + Settings screen
+Goal: stop hard-coding the proxy to one Gemini free-tier key — make the AI provider user-selectable
+with Groq as the default, let the learner bring their own API key (Claude/OpenAI/Gemini/any
+OpenAI-compatible endpoint), and give it a real Settings screen (the sidebar's long-disabled
+"coming soon" item) instead of a `.env`-only setup.
+- [x] Provider abstraction in `api/tutor.js`: `callGemini` → `callLLM` dispatching to Gemini
+      `generateContent`, Anthropic `/v1/messages`, and the OpenAI-compatible `chat/completions`
+      shape shared by Groq (default) / OpenAI / custom base-URL endpoints; `PROVIDERS`/`PROVIDER_MODELS`
+      own URL+model server-side, `providerConfig(req.body)` validates/normalizes what the client
+      sends; per-provider `.env` fallback keys (`GROQ_API_KEY`, `GEMINI_API_KEY`,
+      `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) used when no BYOK key is supplied; `custom` requires a
+      key (no env fallback), base URL validated `https://`, all fields length-bounded (spec §5)
+- [x] BYOK settings store: `src/lib/settings.js` (`tef:settings:v1`, global localStorage — the
+      selected provider + per-provider keys + custom baseUrl/model), with `llmRequestMeta()`
+      building the provider/apiKey fields on each request; the four `/api/tutor` call sites
+      (call turn+score, translate, drill, generateUnit) routed through the single `src/lib/llm.js`
+      `tutorRequest` wrapper (spec §5)
+- [x] `SettingsScreen`: provider radio cards (Groq default badge, Claude/Anthropic, OpenAI, Gemini,
+      Custom), a password-field API key input for the active provider, base URL + model fields for
+      the custom provider, Save with confirmation, and a privacy note explaining where keys live;
+      wired into `App.jsx` `SCREENS` and the `AppSidebar` nav item (polished + converted `Settings`
+      icons' disabled "coming soon" state to a real `view`)
+- [x] i18n: full EN/FR key set for the Settings screen (chrome only — the *values* a learner enters
+      are data and are never run through `t()`); added `.env.example` vars
+- [x] Dev/preview serving of the proxy: `tutorApiPlugin` in `vite.config.js` mounts `/api/tutor`
+      inside Vite's own dev *and* preview servers (body parsing + Express-style `status()`/`json()`
+      shim), so `bun run dev`/`bun run preview` are single-process — the endpoint was previously
+      never served at all in dev (POST 404 → every LLM call failed with a generic "tutor
+      unavailable"); `.env` fallback keys backfilled into `process.env` via `loadEnv` (spec §5)
+- [x] Groq default model fixed: `llama-3.3-70b-versatile` returns `model_not_found` on current Groq
+      plans → switched `PROVIDER_MODELS.groq` to `openai/gpt-oss-20b` (verified live against
+      `/api/tutor`: `translate` and `turn` both return 200, `turn` returning a real French tutor
+      reply); the Groq transport was also moved to the current official shape and then to the official
+      **`openai` SDK** (user-chosen dependency, proxy-only): `callGroq` builds a per-call
+      `new OpenAI({apiKey, baseURL: "https://api.groq.com/openai/v1"})` and calls
+      `client.responses.create({model, input, text.format: {type: "json_object"},
+      max_output_tokens, reasoning: {effort: "low"}})`, reading the `response.output_text` the SDK
+      synthesizes client-side — verified live, all six request types return 200/meaningful errors
+      (spec §5)
+- [x] Test-status discrimination: the proxy carriers a provider HTTP status on non-429 failures and
+      the Settings test maps 401/403 to a distinct `auth_failed` message ("provider rejected your
+      key"), so a bad key is no longer reported as a generic "no response"
+- [x] `type: "test"` on the proxy + a "Test connection" button on the Settings screen: a
+      6th request type doing a zero-content JSON ping through the selected provider/key (or `.env`
+      fallback) so the learner gets a concrete connected / failed / quota(429) status before
+      relying on the provider (spec §5)
+- [x] `bun run lint`/`bun run build`/`bun test` clean
+- Spec refs: §3.1 (all request types), §5, §7

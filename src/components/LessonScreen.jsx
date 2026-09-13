@@ -71,7 +71,7 @@ export default function LessonScreen({ active, onNavigate, lessonId }) {
 
   if (!lesson) {
     return (
-      <div className="flex min-h-svh w-full bg-background">
+      <div className="flex h-svh w-full overflow-hidden bg-background">
         <AppSidebar active={active} onNavigate={onNavigate} />
         <main className="flex flex-1 items-center justify-center">
           <Button variant="ghost" onClick={() => onNavigate('learn')}>
@@ -91,7 +91,7 @@ export default function LessonScreen({ active, onNavigate, lessonId }) {
   }
 
   return (
-    <div className="flex min-h-svh w-full bg-background">
+    <div className="flex h-svh w-full overflow-hidden bg-background">
       <AppSidebar active={active} onNavigate={onNavigate} />
 
       <main className="flex min-w-0 flex-1 flex-col overflow-y-auto">

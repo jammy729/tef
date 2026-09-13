@@ -5,6 +5,7 @@ import ObjectifScreen from './components/ObjectifScreen'
 import ProgressScreen from './components/ProgressScreen'
 import LearnScreen from './components/LearnScreen'
 import LessonScreen from './components/LessonScreen'
+import SettingsScreen from './components/SettingsScreen'
 import { ProfileProvider } from './lib/profiles'
 import { LocaleProvider } from './lib/i18n/LocaleContext'
 
@@ -15,6 +16,7 @@ const SCREENS = {
   progress: ProgressScreen,
   learn: LearnScreen,
   lesson: LessonScreen,
+  settings: SettingsScreen,
 }
 
 function App() {

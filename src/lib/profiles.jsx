@@ -23,6 +23,7 @@ export function ProfileProvider({ children }) {
     setProfileIdState(id);
     setLastProfileId(id);
   };
+  
 
   const profile = useMemo(
     () => PROFILES.find((p) => p.id === profileId) ?? PROFILES[0],

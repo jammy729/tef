@@ -10,6 +10,7 @@ import { COURSE, getAllUnits, getReviewExercises } from '../content/course'
 import { importGeneratedUnit } from '../lib/learningEngine/importGeneratedUnit'
 import { addGeneratedUnit } from '../lib/generatedContent'
 import { getDueReviewItems, getLessonProgressMap, getStreakDays } from '../lib/storage'
+import { tutorRequest } from '../lib/llm'
 import { llmErrorKey } from '../lib/errors'
 
 // The learning path (spec §3.3) — units/lessons with locked/unlocked/done state, a "continue
@@ -47,22 +48,17 @@ export default function LearnScreen({ active, onNavigate }) {
     setGenerating(true)
     setGenerateError(null)
     try {
-      const res = await fetch('/api/tutor', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const { ok, data } = await tutorRequest({
           type: 'generateUnit',
           level: COURSE.levels[0].id,
           existingTopics: units.map((u) => u.title),
           locale: profile.locale ?? 'en',
-        }),
-      })
-      const data = await res.json().catch(() => ({}))
-      if (!res.ok || data.error || !data.unit) {
-        setGenerateError(data.error ?? 'llm_unavailable')
-        return
-      }
-      const { unit, items } = importGeneratedUnit(crypto.randomUUID(), data.unit, data.items ?? {})
+        })
+        if (!ok || !data.unit) {
+          setGenerateError(data.error ?? 'llm_unavailable')
+          return
+        }
+        const { unit, items } = importGeneratedUnit(crypto.randomUUID(), data.unit, data.items ?? {})
       addGeneratedUnit(unit, items)
     } catch {
       setGenerateError('llm_unavailable')
@@ -74,7 +70,7 @@ export default function LearnScreen({ active, onNavigate }) {
   if (reviewing) {
     const exercises = getReviewExercises(dueItems.map((d) => d.itemId))
     return (
-      <div className="flex min-h-svh w-full bg-background">
+      <div className="flex h-svh w-full overflow-hidden bg-background">
         <AppSidebar active={active} onNavigate={onNavigate} />
         <main className="flex min-w-0 flex-1 flex-col overflow-y-auto">
           <header className="border-b border-border px-6 py-5 md:px-10">
@@ -109,7 +105,7 @@ export default function LearnScreen({ active, onNavigate }) {
   }
 
   return (
-    <div className="flex min-h-svh w-full bg-background">
+    <div className="flex h-svh w-full overflow-hidden bg-background">
       <AppSidebar active={active} onNavigate={onNavigate} />
 
       <main className="flex min-w-0 flex-1 flex-col overflow-y-auto">
