@@ -1,0 +1,137 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+@import 'shadcn/tailwind.css';
+@import '@fontsource-variable/fraunces';
+@import '@fontsource-variable/inter';
+
+@custom-variant dark (&:is(.dark *));
+
+/* Design tokens sourced from wireframe/design-system.png — Allô Prof v1.0.
+   Palette: papier/encre/terracotta/ambre/sauge. Do not hand-pick new colors
+   outside this set; extend the palette in the wireframe first. */
+:root {
+  color-scheme: light dark;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+
+  --background: #f7f4ec; /* papier */
+  --foreground: #2b2621; /* encre */
+  --card: #fbf9f3; /* papier clair */
+  --card-foreground: #2b2621;
+  --popover: #fbf9f3;
+  --popover-foreground: #2b2621;
+  --primary: #b3452c; /* terracotta */
+  --primary-foreground: #fbf9f3;
+  --secondary: #2b2621; /* encre — secondary buttons are dark pills */
+  --secondary-foreground: #fbf9f3;
+  --muted: #f0ece0;
+  --muted-foreground: #948b7a; /* texte secondaire */
+  --accent: #f1dfc4; /* soft ambre tint — "bouton doux" / active nav */
+  --accent-foreground: #2b2621;
+  --success: #4b7a5e; /* sauge */
+  --success-foreground: #fbf9f3;
+  --warning: #e8a254; /* ambre */
+  --warning-foreground: #2b2621;
+  --destructive: #b3452c;
+  --destructive-foreground: #fbf9f3;
+  --border: #e7e1d4;
+  --input: #e7e1d4;
+  --ring: #b3452c;
+  --sidebar: #f7f4ec;
+  --sidebar-dark: #2b2621;
+  --sidebar-dark-foreground: #fbf9f3;
+  --radius: 0.75rem;
+}
+
+.dark {
+  --background: #211c18;
+  --foreground: #f7f4ec;
+  --card: #2b2621;
+  --card-foreground: #f7f4ec;
+  --popover: #2b2621;
+  --popover-foreground: #f7f4ec;
+  --primary: #c9603f;
+  --primary-foreground: #211c18;
+  --secondary: #3a332c;
+  --secondary-foreground: #f7f4ec;
+  --muted: #3a332c;
+  --muted-foreground: #ab9f8b;
+  --accent: #4a3b2a;
+  --accent-foreground: #f7f4ec;
+  --success: #5c9174;
+  --success-foreground: #14201a;
+  --warning: #e8a254;
+  --warning-foreground: #211c18;
+  --destructive: #c9603f;
+  --destructive-foreground: #211c18;
+  --border: color-mix(in oklch, white 12%, transparent);
+  --input: color-mix(in oklch, white 15%, transparent);
+  --ring: #c9603f;
+  --sidebar: #1a1613;
+  --sidebar-dark: #14110e;
+  --sidebar-dark-foreground: #f7f4ec;
+}
+
+@theme inline {
+  --font-sans: 'Inter Variable', system-ui, sans-serif;
+  --font-serif: 'Fraunces Variable', ui-serif, serif;
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-dark: var(--sidebar-dark);
+  --color-sidebar-dark-foreground: var(--sidebar-dark-foreground);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  html {
+    @apply font-sans;
+  }
+}
+
+/* Shared typography primitives from the design system's type scale
+   (H1 30px/H2 24px Fraunces 600, label 11px Inter 600 tracking-wide) —
+   defined once so every screen stays on-system instead of repeating utilities. */
+@layer components {
+  .text-h1 {
+    @apply font-serif text-3xl font-semibold tracking-tight text-foreground;
+  }
+  .text-h2 {
+    @apply font-serif text-2xl font-semibold tracking-tight text-foreground;
+  }
+  .label-caps {
+    @apply text-[11px] font-semibold tracking-wider text-muted-foreground uppercase;
+  }
+}
