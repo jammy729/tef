@@ -1,4 +1,4 @@
-import { Captions, Mic, MicOff, PhoneOff, Volume2, VolumeX } from 'lucide-react'
+import { Mic, MicOff, PhoneOff } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useVoiceCall } from '../hooks/useVoiceCall'
 import { Button } from './ui/button'
@@ -10,6 +10,8 @@ import { useLocale } from '../lib/i18n/LocaleContext'
 import { addSession, getLearnerLearningContext } from '../lib/storage'
 import { llmErrorKey } from '../lib/errors'
 import { callSessionLabel } from '../lib/sessionLabel'
+import { getSettings, PROVIDERS } from '../lib/settings'
+import { fetchTranslation } from './InteractiveText'
 
 function formatTimer(seconds) {
   const m = String(Math.floor(seconds / 60)).padStart(2, '0')
@@ -31,15 +33,33 @@ export default function CallScreen({ active, onNavigate, callConfig }) {
     transcript,
     corrections,
     llmError,
-    muted,
-    toggleMuted,
+    micError,
+    greet,
     startListening,
     stopListening,
     endCall,
   } = useVoiceCall(callConfig, locale, getLearnerLearningContext(profile.id).masteredExpressions)
 
   const [elapsed, setElapsed] = useState(0)
-  const [showTranscript, setShowTranscript] = useState(true)
+  const [translations, setTranslations] = useState({})
+
+  useEffect(() => {
+    greet()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- run once on mount
+  }, [])
+
+  // Auto-translates every tutor line so the learner can glance at the meaning below Camille's
+  // French without breaking the flow of the call to click anything.
+  useEffect(() => {
+    transcript
+      .filter((turn) => turn.speaker === 'tutor' && !(turn.text in translations))
+      .forEach((turn) => {
+        fetchTranslation(turn.text).then((translation) => {
+          if (translation) setTranslations((prev) => ({ ...prev, [turn.text]: translation }))
+        })
+      })
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on transcript only, translations read via closure guard above
+  }, [transcript])
 
   useEffect(() => {
     const id = setInterval(() => setElapsed((s) => s + 1), 1000)
@@ -55,9 +75,22 @@ export default function CallScreen({ active, onNavigate, callConfig }) {
     )
   }
 
-  const micDisabled = speaking || waitingForTutor || endingCall
+  const micDisabled = endingCall
   const micLabel = listening ? t('call.mic.stop') : t('call.mic.start')
   const lastTutorTurn = [...transcript].reverse().find((t2) => t2.speaker === 'tutor')
+
+  const { provider } = getSettings()
+  const providerMeta = PROVIDERS.find((p) => p.id === provider)
+  const liveMicKey = micError ? 'call.mic.denied' : listening || speaking ? 'call.mic.on' : 'call.mic.off'
+  const routeText =
+    provider === 'custom' && getSettings().custom?.model
+      ? t('call.route', {
+          provider: providerMeta ? t(providerMeta.labelKey) : provider,
+          model: getSettings().custom.model,
+        })
+      : t('call.routeProvider', {
+          provider: providerMeta ? t(providerMeta.labelKey) : provider,
+        })
 
   const handleHangup = async () => {
     const session = await endCall()
@@ -82,20 +115,47 @@ export default function CallScreen({ active, onNavigate, callConfig }) {
             </p>
           </div>
           <div className="flex items-center gap-2">
-            <span
-              className={cn(
-                'flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium',
-                llmError ? 'bg-destructive/10 text-destructive' : 'bg-accent text-primary',
-              )}
-            >
+            <span className="flex items-center gap-2">
               <span
                 className={cn(
-                  'size-1.5 rounded-full',
-                  llmError ? 'bg-destructive' : 'bg-primary',
+                  'flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium',
+                  llmError ? 'bg-destructive/10 text-destructive' : 'bg-accent text-primary',
                 )}
-              />
-              {llmError ? t('call.status.offline') : t('call.status.connected')}
+              >
+                <span
+                  className={cn(
+                    'size-1.5 rounded-full',
+                    llmError ? 'bg-destructive' : 'bg-primary',
+                  )}
+                />
+                {llmError ? t('call.status.offline') : t('call.status.connected')}
+              </span>
+              <span
+                className={cn(
+                  'flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium',
+                  liveMicKey === 'call.mic.denied'
+                    ? 'bg-destructive/10 text-destructive'
+                    : liveMicKey === 'call.mic.off'
+                      ? 'bg-muted text-muted-foreground'
+                      : 'bg-accent text-primary',
+                )}
+              >
+                <span
+                  className={cn(
+                    'size-1.5 rounded-full',
+                    liveMicKey === 'call.mic.denied'
+                      ? 'bg-destructive'
+                      : liveMicKey === 'call.mic.off'
+                        ? 'bg-muted-foreground'
+                        : 'bg-primary',
+                  )}
+                />
+                {t(liveMicKey)}
+              </span>
             </span>
+            <p className="hidden font-mono text-xs text-muted-foreground md:block" title={routeText}>
+              {routeText}
+            </p>
           </div>
         </header>
 
@@ -125,52 +185,45 @@ export default function CallScreen({ active, onNavigate, callConfig }) {
             </div>
           )}
 
-          {lastTutorTurn && (
-            <div className="w-full max-w-xl rounded-2xl border border-border bg-card px-5 py-4">
-              <p className="label-caps text-primary">{t('call.camilleSays')}</p>
-              <p className="mt-1.5 font-serif leading-relaxed">« {lastTutorTurn.text} »</p>
+          {micError && (
+            <div role="alert" className="flex flex-col items-center gap-2 rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              <p>
+                {micError === 'not-allowed' || micError === 'service-not-allowed'
+                  ? t('call.mic.denied')
+                  : t('call.recognition.error')}
+              </p>
+              <Button size="sm" variant="secondary" onClick={startListening}>
+                {t('call.mic.retry')}
+              </Button>
             </div>
           )}
 
-          {interimText && (
-            <p className="w-full max-w-xl rounded-2xl bg-muted px-5 py-3 text-sm text-muted-foreground">
-              {interimText}
-            </p>
-          )}
+          {/* Live-caption view, not a growing chat log: only the current line is ever shown, replaced
+              turn by turn (spec §3.1) — the full transcript still exists internally (askTutor context,
+              corrections, end-of-call scoring, and the saved Historique record), it's just not
+              rendered here. aria-live carries the requirement forward onto this single region. */}
+          <div aria-live="polite" className="flex w-full max-w-xl flex-col gap-3">
+            {lastTutorTurn && (
+              <div className="w-full rounded-2xl border border-border bg-card px-5 py-4">
+                <p className="label-caps text-primary">{t('call.camilleSays')}</p>
+                <p className="mt-1.5 font-serif leading-relaxed">« {lastTutorTurn.text} »</p>
+                {translations[lastTutorTurn.text] && (
+                  <p className="mt-1 text-sm text-muted-foreground italic">
+                    {translations[lastTutorTurn.text]}
+                  </p>
+                )}
+              </div>
+            )}
 
-          {showTranscript && transcript.length > 0 && (
-            <div aria-live="polite" className="flex w-full max-w-xl flex-col gap-2">
-              {transcript.map((turn) => (
-                <p
-                  key={turn.ts}
-                  className={cn(
-                    'rounded-lg px-3 py-2 text-sm',
-                    turn.speaker === 'tutor' ? 'bg-accent/60' : 'bg-muted',
-                  )}
-                >
-                  <strong className="font-medium">
-                    {turn.speaker === 'tutor' ? 'Camille' : t('call.you')} :
-                  </strong>{' '}
-                  {turn.text}
-                </p>
-              ))}
-            </div>
-          )}
+            {interimText && (
+              <p className="w-full rounded-2xl bg-muted px-5 py-3 text-sm text-muted-foreground">
+                {interimText}
+              </p>
+            )}
+          </div>
         </div>
 
         <div className="flex items-center justify-center gap-3 border-t border-border px-6 py-6">
-          <Button
-            type="button"
-            variant="secondary"
-            size="icon-lg"
-            className="rounded-full"
-            aria-label={showTranscript ? t('call.transcript.hide') : t('call.transcript.show')}
-            aria-pressed={showTranscript}
-            onClick={() => setShowTranscript((v) => !v)}
-          >
-            <Captions />
-          </Button>
-
           <Button
             type="button"
             variant={listening ? 'destructive' : 'default'}
@@ -193,18 +246,6 @@ export default function CallScreen({ active, onNavigate, callConfig }) {
             className="size-14 rounded-full"
           >
             <PhoneOff />
-          </Button>
-
-          <Button
-            type="button"
-            variant="secondary"
-            size="icon-lg"
-            className="rounded-full"
-            aria-label={muted ? t('call.mute.on') : t('call.mute.off')}
-            aria-pressed={muted}
-            onClick={toggleMuted}
-          >
-            {muted ? <VolumeX /> : <Volume2 />}
           </Button>
         </div>
       </main>

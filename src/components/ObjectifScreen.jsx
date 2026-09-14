@@ -100,9 +100,11 @@ export default function ObjectifScreen({ active, onNavigate }) {
             <h1 className="text-h1 text-xl">{t('objectif.header.title')}</h1>
             <p className="text-sm text-muted-foreground">{t('objectif.header.subtitle')}</p>
           </div>
-          <span className="flex items-center gap-1.5 rounded-full bg-muted px-3 py-1 text-xs font-medium text-foreground">
-            <Calendar className="size-3.5" /> {t('objectif.examBadge', { date: profile.examDate })}
-          </span>
+          {profile.examDate && (
+            <span className="flex items-center gap-1.5 rounded-full bg-muted px-3 py-1 text-xs font-medium text-foreground">
+              <Calendar className="size-3.5" /> {t('objectif.examBadge', { date: profile.examDate })}
+            </span>
+          )}
         </header>
 
         <div className="flex flex-1 flex-col gap-8 p-6 md:p-10">

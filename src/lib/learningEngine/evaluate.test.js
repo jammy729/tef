@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { evaluateFillBlank, evaluateMultipleChoice, evaluateProduction, evaluateTranslation } from './evaluate.js'
+import { evaluateFillBlank, evaluateMultipleChoice, evaluatePronunciation, evaluateTranslation } from './evaluate.js'
 
 describe('evaluateMultipleChoice', () => {
   test('matches the exact option string', () => {
@@ -36,15 +36,24 @@ describe('evaluateTranslation', () => {
   })
 })
 
-describe('evaluateProduction', () => {
-  test('accepts tiles joined in the correct order, normalized', () => {
+describe('evaluatePronunciation', () => {
+  test('accepts an exact (normalized) transcript match', () => {
     const exercise = { answer: 'À mon avis, le télétravail est utile.' }
-    expect(evaluateProduction(exercise, 'À mon avis, le télétravail est utile.')).toBe(true)
-    expect(evaluateProduction(exercise, '  à mon avis, le télétravail est utile  ')).toBe(true)
+    expect(evaluatePronunciation(exercise, 'À mon avis, le télétravail est utile.')).toBe(true)
+    expect(evaluatePronunciation(exercise, '  à mon avis, le télétravail est utile  ')).toBe(true)
   })
 
-  test('rejects tiles joined in the wrong order', () => {
+  test('accepts a close-enough transcript (word-overlap heuristic)', () => {
     const exercise = { answer: 'Ils peuvent travailler le week-end.' }
-    expect(evaluateProduction(exercise, 'peuvent Ils travailler le week-end.')).toBe(false)
+    expect(evaluatePronunciation(exercise, 'Ils peuvent travailler le weekend.')).toBe(true)
+  })
+
+  test('rejects an unrelated transcript', () => {
+    const exercise = { answer: 'Ils peuvent travailler le week-end.' }
+    expect(evaluatePronunciation(exercise, 'Bonjour tout le monde')).toBe(false)
+  })
+
+  test('rejects an empty transcript', () => {
+    expect(evaluatePronunciation({ answer: 'Selon moi.' }, '')).toBe(false)
   })
 })

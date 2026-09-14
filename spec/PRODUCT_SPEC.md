@@ -54,11 +54,31 @@ A live voice call with an AI tutor, strictly scoped to TEF-relevant spoken conve
 chat, Task A info-seeking scenarios, Task B opinion/debate scenarios, or full mock exam).
 
 #### 3.1.1 In-call experience
-- Full-screen "in a call" UI: tutor name/avatar, call timer, a single mic-forward control (hold or
-  tap-to-talk, not a chat input box front-and-center).
-- **Live speech-to-text**: the learner's speech is transcribed in real time and shown as it's
-  recognized (interim + final results from `SpeechRecognition`), so they can see what the AI heard.
-- Tutor responses are *spoken* (TTS) and appear as text after/while speaking, not before.
+- Full-screen "in a call" UI: tutor name/avatar, call timer, a single mic-forward control — a mute
+  toggle, not a chat input box front-and-center.
+- **Mic is always on for the whole call**, like an actual phone line — the learner never has to
+  tap a button before every turn. The mic control mutes/unmutes the learner's own input; it does
+  not gate the call into a rigid tutor-speaks-then-learner-speaks lockstep (`useVoiceCall`'s
+  `SpeechRecognition` instance runs continuously for the call's duration and auto-restarts if the
+  browser stops it after silence). While the tutor is speaking, recognized speech is discarded
+  rather than appended to the transcript, since it's the tutor's own TTS audio looping back
+  through the mic, not the learner.
+- **Live speech-to-text, live-caption style, not a growing chat log**: the learner's speech is
+  transcribed in real time and shown as it's recognized (interim + final results from
+  `SpeechRecognition`), so they can see what the AI heard — but only the *current* line is ever
+  on screen, replaced turn by turn, so a call feels like a normal conversation rather than reading
+  a transcript as it accumulates. The full turn-by-turn transcript still exists internally
+  (`useVoiceCall`'s `transcript` state) — it's what themes the tutor's next reply, what the
+  end-of-call rubric score is computed from, and what's saved to the learner's Historique record
+  (§3.1.4) — only the live on-screen *display* during the call itself is limited to the current
+  turn.
+- Tutor responses are *spoken* (TTS) and appear as text after/while speaking, not before, alongside
+  an auto-fetched English/French translation of the tutor's line shown just below it (via the
+  `type: "translate"` proxy request also used by Learn & Practice's `InteractiveText`, §3.3.2), so
+  the learner can follow along without breaking the flow of the call.
+- The call opens with a short spoken French greeting themed to the mode (free / Task A / Task B /
+  mock), so the learner is never dropped into dead silence — the tutor initiates, like a real
+  phone call.
 - Barge-in not required for v1 (learner waits for tutor to finish, like a real phone call turn).
 - **In-call guidance**: if the learner goes silent too long, gives a very short/broken answer, or
   the recognizer flags very low confidence, the tutor proactively helps rather than waiting
@@ -131,23 +151,45 @@ taught at B1. Each unit is built from the same argumentation toolkit as the foun
 so progress, mistakes, review scheduling, and the Call's mastered-expression theming (§3.1.6) all
 reference the same object. Lessons are gated linearly (a lesson unlocks once the previous one in
 its unit is done, and a unit's first lesson unlocks once the previous unit is fully done); the
-path screen always shows one obvious next action ("Continue learning").
+path screen always shows one obvious next action ("Continue learning"). A `vocabulary` item whose
+`partOfSpeech` is a verb or adjective can carry the full grammatical-variant table alongside it —
+`conjugation: {je, tu, ilElle, nous, vous, ilsElles}` (present tense by default, `word` holds the
+infinitive) for a verb, `agreement: {masculineSingular, feminineSingular, masculinePlural,
+femininePlural}` for an adjective — each form tap-to-hear, rendered by `LessonScreen`'s
+`LearningItemCard`. Both fields are optional and absent for everything else (nouns, invariant
+phrases like "Selon moi" have nothing to conjugate/agree). These tables are authored across **all**
+content: `generateUnitSystemPrompt` (`api/tutor.js`) authors them for AI-generated verbs/
+adjectives, and the 15 hand-authored unit files carry them too (every verb/verb-phrase/expression
+item with a genuine person paradigm, every qualifying adjective — nouns and invariant phrases
+correctly none). A phrase fixed in a non-present tense sets `conjugation.tense` (e.g. _on devrait_,
+_je voudrais_ → `conditional`), and a cell where elision or a clitic/reflexive pronoun would make a
+bare form misleading is authored as the full phrase including its subject ("J'ai mal à", "Je
+m'occupe de") — `LessonScreen`'s `FormsGrid` detects the full-phrase style and renders/speaks it
+as-is instead of doubling the pronoun label ("je J'ai mal à"). `src/content/course.test.js`
+validates every table's shape and that only verb/adjective-type items carry them.
 
 The curriculum is not fixed to the hand-authored themes: a learner can grow it on demand via
 **"Generate a new unit"** (§3.2.6), so the path can extend to arbitrarily many TEF-relevant topics
 without every one being covered by hand-authored content.
 
-#### 3.2.2 Exercise types (v1) — all tap-only, no typing
+#### 3.2.2 Exercise types (v1) — tap or speak, never typed text
 Four types, evaluated by `src/lib/learningEngine/evaluate.js` (pure functions, never an LLM call
 and never a UI component directly):
 - **multiple choice**: `content.options`, tap the correct one.
 - **fill-in-the-blank** / **translation**: `content.options` (correct answer + 2-3 distractors)
   rendered as a `ChoiceBank` of tappable chips — exact-match against the accepted answer,
   case/whitespace-normalized.
-- **production** ("write a sentence"): `content.tiles` (the correct words + a couple of distractor
-  words, shuffled) rendered by `TileBuilder` — the learner taps tiles in order to construct the
-  target sentence, checked by normalized string comparison against `answer`. No LLM evaluation in
-  this path at all.
+- **pronunciation** ("say the sentence aloud"): `content.sentence` (the target French sentence)
+  rendered by `SpeakingPrompt` — the learner taps a mic button and reads it aloud (Web
+  `SpeechRecognition`, `fr-FR`, one attempt per tap, tap again to stop early). `evaluatePronunciation`
+  checks the recognized transcript against `answer`: an exact normalized match passes immediately,
+  otherwise a ≥ 70% word-overlap ratio passes — a text-similarity heuristic, not true
+  phoneme-level pronunciation scoring (§6 still holds; this is the closest honest proxy a
+  browser-only app can offer without an acoustic confidence signal, which `SpeechRecognition`
+  doesn't reliably expose either). No LLM evaluation in this path at all. Replaced the earlier
+  tile-based "production" ("build the sentence," `TileBuilder`) exercise type — the user found
+  sentence-building tiles unhelpful; every hand-authored exercise across all 15 units was migrated,
+  and AI-generated content (`generateUnit`/`itemDrill`) produces `pronunciation` exercises now too.
 
 Deferred to a later pass, not built: sentence-ordering, matching, and listening-prep exercise
 types — the engine is designed so adding one doesn't require rewriting the lesson/runner
@@ -155,16 +197,53 @@ components.
 
 #### 3.2.3 Lesson flow
 Two stages per lesson, run by `LessonScreen`/`ExerciseRunner`:
-1. **Learn** — each LearningItem renders as a card (word/phrase/grammar-appropriate template)
-   showing its meaning, an example sentence, rendered through `InteractiveText` so the learner can
-   click/hover any word or the whole sentence to hear it (TTS) and see an English gloss
-   (`type: "translate"`, §5).
-2. **Practice** — `ExerciseRunner` steps through the lesson's exercises one at a time, all tap-only
+1. **Learn** — a sequential, one-item-at-a-time study session (not a wall of cards): the learner
+   steps through each LearningItem in order with Prev/Next controls and a "Studying item X of Y"
+   progress header, and the item's term is spoken aloud automatically the moment it appears
+   (`src/lib/audio.js` TTS, the same voice the Call and `ExerciseRunner` use; ref-guarded so dev
+   StrictMode double-mounts never speak it twice) — comprehension should start by ear. Each card
+   renders with a word/phrase/grammar-appropriate template showing its meaning and an example
+   sentence, rendered through `InteractiveText` so the learner can click/hover any word or the whole
+   sentence to hear it (TTS) and see an English gloss (`type: "translate"`, §5), plus the item's
+   full `conjugation`/`agreement` table (§3.2.1) laid out tap-to-hear so every form is *understood*
+   before any exercise. A **"Practice more"** button (`ItemPractice.jsx`) lets the learner
+   generate 8 fresh exercises for just that one item on demand — `api/tutor.js` `type: "itemDrill"`
+   sends the item's term/meaning/level (plus its `conjugation`/`agreement` table when present, so
+   the generated exercises spread across different forms — "vous coupez," not always "couper" —
+   instead of only ever testing the base form) and gets back exercises in the same
+   `{id, learningItemId, type, stage, prompt, content, answer, explanation}` shape `generateUnit`
+   uses (the server assigns `id`/`learningItemId` itself rather than trusting the model, since
+   there's exactly one real item per request). Unlike the Mistake Bank's ephemeral, unrecorded
+   `MistakeDrill` (§3.1.5), these run through the same `ExerciseRunner` as lesson practice, so
+   attempts count toward that item's mastery like any other practice.
+2. **Practice** — when the lesson teaches verbal/adjectival forms it opens by merging a
+   forms-covering batch: `LessonScreen` fires `type: "itemDrill"` for every item carrying a
+   `conjugation`/`agreement` table (bounded to ~4 items so one lesson never makes more than a
+   handful of proxy calls, §7) and appends the fresh form-spread exercises after the authored set,
+   behind a brief "preparing practice" state — practice genuinely covers the whole range the Learn
+   session just showed (je/tu/il-elle/nous/vous/ils-elles, all four agreement cells), not just the
+   base form. If the proxy is unavailable or quota'd it falls back to the authored exercises alone —
+   the learn/practice loop never depends on the LLM (§7). Then `ExerciseRunner` steps through the
+   lesson's exercises one at a time, in a fresh shuffled order every session (Fisher-Yates,
+   re-randomized on each mount — the same lesson, review queue, or placement quiz never walks
+   exercises in a fixed authored order), tap-or-speak 
    (§3.2.2). Every incorrect answer gets a **"Try again"** and a **"Continue"** option (never forced
    to move on, but never blocked either) plus an explanation of *why*. A `hints` array on an
    exercise (when authored) reveals progressively, and using a hint counts as a data point for
    mastery (§3.2.4) without penalizing as harshly as an outright miss. A lesson ends with an
-   accuracy/mastery summary, not just an XP number.
+   accuracy/mastery summary, not just an XP number. Every exercise speaks its question aloud the
+   moment it loads and plays a distinct synthesized chime on submit — correct or incorrect
+   (`src/lib/audio.js`: `speak`/`speakFrench`, plain browser `speechSynthesis`; `playCorrectSound`/
+   `playIncorrectSound`, Web Audio oscillators, no audio asset to source/host).
+   `ExerciseRunner` is shared by lesson practice, the review queue, and the onboarding placement
+   quiz (§4), so all three get this for free. A `multiple_choice` exercise built on a vocabulary/
+   phrase `LearningItem` — where the French term is the stimulus and the options are English
+   meanings — shows and speaks just that French term (`frenchTermFor()`, tap-to-hear-again, French
+   voice) instead of a "What does X mean?" instructional sentence, matching how `InteractiveText`
+   already presents French content elsewhere. Exercise types where the French form *is* the
+   answer (translation) or that already display their French content directly (fill_blank's
+   `content.sentence`, pronunciation's own sentence display in `SpeakingPrompt`) keep the plain
+   instructional prompt — showing the term there would hand over the answer.
 
 #### 3.2.4 Mastery & review (the learning engine)
 Pure functions in `src/lib/learningEngine/` — no learning logic lives in a React component:
@@ -194,8 +273,11 @@ Beyond the hand-authored theme units in `src/content/units/`, a learner can tap 
 unit"** on the Learn screen to grow the course:
 - `api/tutor.js` `type: "generateUnit"`: input `{level, existingTopics, locale}` (existing unit
   titles are passed so the model picks something new), output `{unit, items}` matching
-  `course.js`'s existing unit/lesson/learningItem/exercise shapes (including tap-only exercise
-  content, §3.2.2). Reuses the shared Gemini JSON-mode helper — no new backend surface.
+  `course.js`'s existing unit/lesson/learningItem/exercise shapes (including tap-only-or-spoken
+  exercise content, §3.2.2). Each lesson gets 10-16 exercises (not 4-6) covering an item's
+  different grammatical forms when it has a `conjugation`/`agreement` table, so practice is
+  substantially deeper than one exercise per item. Reuses the shared JSON-mode helper — no new
+  backend surface.
 - `src/lib/learningEngine/importGeneratedUnit.js` (pure, no I/O) namespaces every id in the
   response (`gen_<runId>_<originalId>`) and rewrites internal references, so generated content can
   never collide with static content or a previous generation run.
@@ -209,7 +291,30 @@ unit"** on the Learn screen to grow the course:
   units are (§3.2.1).
 - If the LLM proxy is unavailable or over its free-tier quota, "Generate a new unit" shows the same
   `llm_unavailable`/`quota_exceeded` messaging used elsewhere (§7) — the rest of Learn & Practice
-  keeps working regardless, since no other part of it calls the LLM.
+  keeps working regardless. Every other LLM touch-point in it ("Practice more" on a single item, the
+  practice-stage forms-covering merge, the lesson Q&A below) fails over individually with its own
+  message or a no-LLM fallback — no part of the core loop bricks when the proxy is down.
+
+#### 3.2.7 Ask your AI tutor (lesson Q&A)
+At the bottom of every lesson stage — **Learn, Practice, and the completion summary** — sits
+**"Ask your AI tutor"** (`LessonAsk.jsx`) — a free-form text question run through the learner's
+chosen provider via the same `/api/tutor` proxy (`type: "ask"`, §5), answered in-place by a short
+teacher-style reply. It exists for exactly the comprehension questions that come up at any point in
+a lesson ("What's the difference between _"à mon avis"_ and _"selon moi"_?"), answered without
+leaving the lesson.
+- Input `{question, lessonTitle, itemTerm, locale}` (the lesson/item are our own course content,
+  provided so answers are contextualized), output `{answer}`. The `answer` is generated in the
+  learner's current UI `locale` — it's instructional metadata like a correction's `reason`/`rule`
+  (§3.1.3), not French course content — and rendered raw, never through `t()`.
+- The text field is the **single deliberate `<textarea>` in the app**: user-initiated free-form Q&A
+  is not an exercise, so the tap-or-speak-only rule (§3.2.2) applies to exercises and their answer
+  evaluation, not to typing a question here. The question is capped client-side (300 characters),
+  re-bounded server-side, and travels only in the request's `user` role — never concatenated into
+  the system prompt (the same injection boundary as the call transcript, §5).
+- Answers are ephemeral (kept only for the lesson session, not persisted), each ask is a stateless
+  one-shot, and when the proxy is down or quota'd the panel shows the same
+  `llm_unavailable`/`quota_exceeded` messaging as everywhere else (§7) — exercises keep working
+  regardless.
 
 ### 3.3 Considered, not built
 
@@ -235,23 +340,67 @@ Ideas raised and deliberately deferred — recorded so they aren't silently lost
 - **Merging the Call's Mistake Bank and Learn & Practice's review queue**: two separate weak-signal
   surfaces today (§3.1.5 vs. §3.2.4) — a unified "everything you should review" view is future work.
 
-## 4. Two-profile model
+## 4. Accounts (Supabase Auth)
 
-Exactly two static local profiles (the two learners), no accounts, no passwords:
-- No gating picker screen. The app always boots straight into **Learn & Practice** (§3.2) using the
-  last-used profile (or the first static profile on a brand-new browser). Clicking the avatar/name
-  row in `AppSidebar` switches instantly to the other profile — no confirmation modal, no separate
-  picker route. `src/lib/profiles.jsx` holds the static `PROFILES` list and the
-  `ProfileProvider`/`useProfile()` context; `src/lib/storage.js` persists which profile id was last
-  active.
-- All data below is namespaced under the chosen profile's id in local storage, except AI-generated
-  curriculum content (§3.2.6), which is shared across profiles. Switching profiles never mixes
-  session/progress history.
+Real accounts replace the earlier two-static-profile/local-only model — email + password sign-up
+and sign-in via Supabase Auth, one `profiles` row per user (§5 has the schema):
+- **No gating picker screen, but a real sign-in gate.** `App.jsx`'s `Router` renders
+  `OnboardingScreen` at `/registration` whenever there's no session, or a session exists but the
+  account hasn't finished local setup (`profile.onboarded` false). Once both are true, the app
+  boots straight into **Learn & Practice** (§3.2) as before. `src/lib/profiles.jsx`'s
+  `ProfileProvider` tracks the Supabase session (`supabase.auth.getSession()` +
+  `onAuthStateChange`) and exposes `profile` (derived from the session + the hydrated per-user
+  blob), `ready` (true once the initial session check and data hydration are both done —
+  `Router` shows a blank loading frame until then, the one place true async loading exists),
+  `signUp`/`signIn`/`signOut`, and the unchanged `completeOnboarding`/`saveProfile`.
+- **Onboarding is now two real stages.** `OnboardingScreen`: an **auth** step (email + password,
+  toggle between sign-in/sign-up; the sign-up form also collects the display name directly — "What
+  should we call you?" alongside email/password — so a new account skips straight to the level
+  step below; a sign-up that requires email confirmation shows a "check your email" message
+  instead of erroring) followed, once signed in and not yet onboarded, by the **local setup**
+  step — a self-assessed starting CEFR level (A1–C2, cosmetic/informational only; the curriculum is
+  still a single fixed B1 track per §5, this doesn't gate or branch content), with the same
+  optional placement quiz (`getPlacementExercises()` in `src/content/course.js`, run through
+  `ExerciseRunner`, no new exercise type, no LLM call) pre-filling the level chip. A **name** step
+  still exists as a fallback — reached only when signing in on an account that was created but
+  never finished setup (name not yet saved), pre-filled from the account email. Finishing writes
+  `{ name, startingLevel, onboarded: true }` via `saveProfile`/`completeOnboarding` into the
+  Supabase-backed blob (§5), and `AppSidebar`'s footer displays that saved name. A returning user
+  who signs back in skips straight past both stages.
+- **Sidebar profile footer**: `AppSidebar`'s bottom-left corner shows the active profile (avatar
+  initials, display name — display-only; there's no seeded exam date for real accounts, so
+  `ObjectifScreen`'s exam badge is now conditionally rendered like `CallInsights` already did) with
+  a **Log out** icon button that calls the real `signOut()` — an actual sign-out now, not a local
+  reset.
+- All data below is namespaced under the signed-in user's id, both in the Supabase `profiles` row
+  and the client-side cache mirroring it (§5), except AI-generated curriculum content (§3.2.6),
+  which is shared across all accounts.
 
 ## 5. Architecture
 
 - **Frontend**: the existing Vite + React scaffold (`src/`). No new state-management library —
-  React context for current profile/call state, `localStorage` for persistence.
+  React context for current profile/call state.
+- **Accounts + progress persistence: Supabase.** One table, `public.profiles` (`id uuid` = the
+  Supabase Auth user id, `data jsonb` holding exactly the shape `src/lib/storage.js` used to keep
+  in `localStorage` — `sessions`, `errorStats`, `lessonProgress`, `learningProgress`, `meta`),
+  RLS-protected with `auth.uid() = id` as the sole ownership rule (`select`/`insert`/`update`
+  policies, `TO authenticated`, `WITH CHECK` on update — see `supabase/migrations/`). Every screen
+  reads `storage.js` **synchronously** (no loading states scattered through the app), so the data
+  layer keeps that shape rather than becoming async everywhere: `storage.js` holds an in-memory
+  cache, hydrated once from Supabase right after sign-in (`hydrateFromSupabase`, awaited by
+  `ProfileProvider` before it flips `ready`), and every write updates the cache instantly (the UI
+  never waits on the network) then pushes the whole blob to Supabase in the background via a
+  debounced (~800ms) upsert — `// ponytail:` marked in `storage.js`: no offline queue/retry, no
+  cross-tab conflict resolution, fine at this app's scale, worth revisiting if usage grows.
+  `src/lib/supabase/client.js` (`@supabase/ssr`'s `createBrowserClient`, reading
+  `VITE_SUPABASE_URL`/`VITE_SUPABASE_PUBLISHABLE_KEY`) is instantiated once as a shared singleton
+  and imported by both `storage.js` and `profiles.jsx` — never call `createClient()` a second
+  time. Unlike the LLM proxy's server-only keys, these **are** meant to reach the client bundle
+  (`VITE_` prefix required for that) — the publishable key is safe to ship client-side by design,
+  RLS is the actual security boundary. `SUPABASE_DATABASE_PASSWORD` is CLI/migration-only, never
+  read by app code. Out of scope for this migration: `src/lib/settings.js` (bring-your-own LLM
+  provider keys) and `src/lib/generatedContent.js` (shared AI-generated curriculum) — neither is
+  "user or progress" data, both stay `localStorage`-only.
 - **Styling/components**: Tailwind CSS (utility classes) + shadcn/ui (Button, Card, and similar
   primitives, generated into `src/components/ui/` rather than pulled in as an opaque npm package).
   This is the app's one deliberate exception to "no new dependency without a reason." Light/dark
@@ -271,7 +420,9 @@ Exactly two static local profiles (the two learners), no accounts, no passwords:
 - **UI language (i18n)**: the app's own chrome — nav labels, headers, buttons, section titles,
   aria-labels — supports English and French, English by default, via a hand-rolled dictionary
   (`src/lib/i18n/en.js` / `fr.js`) and a `LocaleContext` (`src/lib/i18n/LocaleContext.jsx`), no new
-  dependency. Persisted to `localStorage`, switchable from a pill toggle in `AppSidebar`. **Hard
+  dependency. Persisted to `localStorage`, switchable from a pill toggle in the **Settings
+  screen**'s Language card (`SettingsScreen`) — not `AppSidebar`, which no longer carries any
+  settings controls. **Hard
   boundary**: this mechanism never touches the tutor's spoken French, the learner's own transcript,
   or the flagged text/corrected form/exercise content of any correction or exercise — that content
   is the subject being taught and always stays French, regardless of UI locale. A correction's
@@ -281,21 +432,72 @@ Exactly two static local profiles (the two learners), no accounts, no passwords:
   else (`examples`, exercise prompts/tiles/options, generated unit content) is always French. The
   two string populations are structurally separate (i18n dictionary keys vs. LLM-proxy-returned
   content) so this can't blur by accident.
-- **Navigation**: no router dependency. The app loads directly into Learn & Practice (default
-  landing view — see §4). A small, fixed set of top-level screens (Learn / Lesson / Call /
-  Historique / Objectif TEF / Progrès / Réglages) is switched via React state in a top-level
-  context — not URL-based routing.
+- **Navigation**: no router dependency, but real URL paths via the native History API
+  (`src/lib/router.js` `pathToView`/`viewToPath`, wired into `App.jsx`'s `Router`) — one path per
+  top-level screen (`/learn`, `/lesson/:id`, `/call`, `/historique`, `/objectif`, `/progress`,
+  `/settings`, plus `/registration` for onboarding), so each screen is directly linkable/
+  bookmarkable and back/forward work via `popstate`. Screen switching is still React state
+  (`view`/`lessonId` in `App.jsx`), kept in sync with `window.location` by `pushState`/
+  `replaceState` on every `onNavigate()` call — no route-matching library, no nested routes, no
+  data-loader convention. The app loads directly into Learn & Practice (default landing view — see
+  §4) when the path doesn't match a known screen.
 - **Voice**:
   - STT: Web `SpeechRecognition` API, French locale (`fr-FR` or `fr-CA`), Chrome/Edge only.
   - TTS: Web `speechSynthesis` API, pick the best available French voice.
   - Wrapped behind a single hook (`useVoiceCall`) so the rest of the app never touches the raw
     browser APIs directly, and so unsupported browsers get one clear "use Chrome" message instead
-    of scattered failures.
+    of scattered failures. `useVoiceCall.greet()` opens every call with a local, canned,
+    mode-aware French greeting (free/Task A/Task B/mock — Task A/B name the actual scenario) —
+    spoken immediately rather than waiting on an LLM round trip, so the learner is never dropped
+    into dead silence; guarded against firing twice under React 18 StrictMode's double-invoked
+    mount effects.
+  - `src/lib/audio.js` centralizes the browser-native speech/sound-effect helpers used outside the
+    call (`speakFrench` for known-French content — `InteractiveText`'s click-to-hear, `useVoiceCall`
+    itself delegates to it, and `ExerciseRunner`'s French-term exercises; `speak` for exercise
+    prompts that stay plain instructional text, no language forced; `playCorrectSound`/
+    `playIncorrectSound`, two distinct synthesized Web Audio chimes) — one place instead of three
+    separate `SpeechSynthesisUtterance` implementations.
+  - **Speaker settings** (Settings screen's **Speaker** tab, `src/lib/settings.js` `voice: {rate,
+    gender}`, device-local like the LLM provider config): a speed slider (0.5×-1.5×) and a female/
+    male voice preference, both read by `speak`/`speakFrench` on every call (explicit `rate`/
+    `gender` args let the Settings screen preview unsaved changes before hitting Save). Gender is
+    a name-based heuristic (`\b`-boundary matched against a curated list covering common Edge/
+    Windows, macOS, and Chrome/Google French voice names) over whatever French voices the
+    browser/OS actually ships — the Web Speech API exposes no real `.gender` field.
+    `pickFrenchVoice()` (`src/lib/audio.js`) never lets that heuristic silently collapse both
+    settings onto the same voice: when a name match exists for the requested gender, it's used
+    (preferring a non-local/cloud voice among ties, since those are usually more natural); when
+    neither gender has a recognized name on a given platform, it falls back to a stable split of
+    the available French voices by name order (first vs. last) rather than the same single
+    default voice for both — so the toggle always audibly changes something, even on platforms
+    with no recognizable voice names. `getVoices()` returning empty on the very first call after
+    page load (a well-known async-loading quirk, mainly on Chrome) is also handled —
+    `waitForVoices()` awaits the `voiceschanged` event (1s timeout fallback) before the first
+    utterance ever speaks, so the very first thing said doesn't fall back to an unrelated default
+    voice. The voice is re-resolved fresh per spoken segment rather than cached once per call,
+    working around a Chrome bug where a `SpeechSynthesisVoice` reference can silently stop being
+    honored if it isn't from the latest `getVoices()` call — otherwise audible as "the voice
+    changes partway through a longer greeting."
+  - **Deliberate speech pacing, not flat monotone TTS**: because `SpeechSynthesisUtterance` takes
+    plain text with no SSML/break-tag support, `speakSegments()` (`src/lib/audio.js`) splits
+    spoken text on punctuation (`,;:.!?`) and speaks each segment as its own utterance with a
+    pause in between — longer after a sentence boundary (`.`/`!`/`?`) than after a comma — so
+    French speech reads with real cadence. `stopSpeaking()` cancels an in-flight chain (mute,
+    barge-in) via a generation counter, since `speechSynthesis.cancel()` alone only stops the
+    *current* chained utterance, not ones still scheduled.
 - **LLM**: a choose-your-provider setup fronted by **one small serverless function** (`api/tutor.js`)
   — the only "backend" the app has (no server framework, no database). **Groq is the default
   provider** (free tier, fast); Anthropic/Claude, OpenAI, Google Gemini, and any OpenAI-compatible
   custom endpoint (base URL + model) are selectable from the **Settings screen** (a standard sidebar
-  screen alongside Learn/Call/Progress, reachable from `AppSidebar`). The proxy owns each
+  screen alongside Learn/Call/Progress, reachable from `AppSidebar`). The Settings screen is
+  organized as four tabs (`src/components/ui/tabs.jsx`, a thin Radix `Tabs`-primitive wrapper
+  following the same shadcn-generated-not-installed pattern as `ui/button.jsx`/`ui/card.jsx` — no
+  new dependency, `radix-ui` was already installed): **Profile** (edit display name/starting
+  level — the same `LEVELS` chip picker `OnboardingScreen` uses, saved via
+  `useProfile().saveProfile()`), **Language** (the EN/FR chrome toggle, moved here from the
+  sidebar footer), **Speaker** (speed/voice-gender, above),
+  and **AI provider** (below). Structured so
+  a future settings section is just one more tab. The proxy owns each
   provider's URL/model (`PROVIDERS`/`PROVIDER_MODELS` in `api/tutor.js`) — the client never sends
   more than a provider id in the request payload. In dev and preview the handler is served **inside
   the Vite process itself** (`tutorApiPlugin` in `vite.config.js` mounts `/api/tutor` — it parses
@@ -309,7 +511,7 @@ Exactly two static local profiles (the two learners), no accounts, no passwords:
     request (`src/lib/llm.js` `tutorRequest` is the single fetch wrapper) so the proxy can route
     it to the chosen provider. This is the deliberate, learner-chosen exception to "keys stay
     server-side" — the value is their own secret, never committed or logged.
-  - Every request to the proxy (all six types below) goes through `callLLM`, which shapes the
+  - Every request to the proxy (all eight types below) goes through `callLLM`, which shapes the
     JSON-mode payload per provider — Groq goes through the official **`openai` SDK**
     (`client.responses.create` against `https://api.groq.com/openai/v1`, reading
     `response.output_text`; a client is built per call with the resolved key), Gemini via
@@ -330,6 +532,19 @@ Exactly two static local profiles (the two learners), no accounts, no passwords:
     - `type: "drill"` — a weak `category` in, `{exercises: [{prompt, answer, options, hint}]}` out
       (3-5 fresh tap-only exercises for the Mistake Bank's "Practice this," §3.1.5) — `options`
       built server-side from the model's `distractors` + `answer`, shuffled.
+    - `type: "itemDrill"` — `{learningItemId, term, meaning, level, locale, variants}` in (`variants`
+      is the item's `conjugation`/`agreement` table when it has one, bounded server-side), 8
+      exercises out (`{exercises: [...]}`) spread across the word's different grammatical forms
+      when `variants` was sent, in the richer `generateUnit` shape
+      (`id`/`learningItemId`/`type`/`stage`/`prompt`/`content`/`answer`/`explanation`), so
+      they run through `ExerciseRunner` like any other practice, not `drill`'s bespoke
+      `{prompt, answer, options, hint}` mini-stepper. `id`/`learningItemId` are assigned
+      server-side, never trusted from the model.
+    - `type: "ask"` — `{question, lessonTitle, itemTerm, locale}` in, `{answer}` out (§3.2.7), the
+      lesson's "Ask your AI tutor" free-form Q&A. `question` is the learner's own text — capped
+      client-side and re-bounded server-side, passed only in the `user` role alongside bounded
+      lesson/item context, never spliced into the system prompt. The `answer` is written in the
+      learner's UI `locale` (instructional, like `reason`/`rule`) and rendered raw.
     - `type: "generateUnit"` — `{level, existingTopics, locale}` in, `{unit, items}` out (§3.2.6),
       matching `course.js`'s unit/lesson/learningItem/exercise shapes including tap-only exercise
       content; validated server-side before being returned (malformed generations are rejected as
@@ -338,6 +553,11 @@ Exactly two static local profiles (the two learners), no accounts, no passwords:
       (`{"status":"ok"}`) through the learner's chosen provider + key (or `.env` fallback), so the
       provider/key/config match is confirmed with a concrete good/bad/quota signal *before* relying
       on it, instead of discovering it on a real call.
+  - Every proxy call the client makes is counted on-device for the Progress dashboard's AI usage
+    card (`src/lib/usage.js`, `tef:usage:v1` in `localStorage` — global, like the settings store):
+    total / today / by-request-type counts, plus the last "Test connection" result (recorded by the
+    Settings screen). Call counts only, by design — the proxy returns no token counts, so
+    tokens/cost are deliberately out of scope (§7).
   - Still not built: in-call guidance (rephrase/hint) when the learner is stuck (§3.1.1 —
     deliberately deferred).
   - A provider `429` (quota/rate limit hit) is surfaced as a distinct `quota_exceeded` error code
@@ -357,11 +577,12 @@ Exactly two static local profiles (the two learners), no accounts, no passwords:
   module layer instead of a server layer, since this app has neither a server framework nor a
   database to put a "Learning Service" in. `src/lib/storage.js` is the only layer that touches
   localStorage for per-profile data; `src/lib/generatedContent.js` is the only layer that touches
-  localStorage for shared curriculum data. `ExerciseRunner`/`LessonScreen`/`LearnScreen` only render
+  localStorage for shared curriculum data; `src/lib/usage.js` is the only layer that touches
+  localStorage for device/app-level LLM activity (§7). `ExerciseRunner`/`LessonScreen`/`LearnScreen` only render
   state and collect tap input.
 - **Tests**: `bun test` (Bun's built-in runner, no new dependency) covers the learning engine's pure
   functions (`src/lib/learningEngine/*.test.js`) — mastery updates, review-interval scheduling,
-  tile-based production evaluation, and generated-unit id-namespacing. UI/e2e tests for the rest of
+  pronunciation-transcript evaluation, and generated-unit id-namespacing. UI/e2e tests for the rest of
   the app are not set up.
 - **Data model** (per profile, in `localStorage['tef:v1']`, see `src/lib/storage.js`):
   ```
@@ -392,24 +613,42 @@ Exactly two static local profiles (the two learners), no accounts, no passwords:
 
 ## 6. Non-goals (v1)
 
-- No server-side accounts or authentication system.
+- No auth beyond plain Supabase email+password (§4) — no OAuth/social login, no MFA, no password
+  reset UI beyond Supabase's own hosted flow.
 - No payments/subscriptions.
 - No native mobile app — responsive web only.
 - No offline or self-hosted model support (no local Whisper/Ollama, no client-side NLP/grammar
   parser) — relies on the browser's built-in speech APIs and a hosted free-tier LLM.
 - No support for browsers without the Web Speech API (Firefox/Safari) beyond a clear warning for
   the Call feature — Learn & Practice works in any modern browser.
-- No true phoneme-level pronunciation scoring — pronunciation feedback is a best-effort heuristic
-  from recognizer confidence, not a certified pronunciation-assessment product.
-- No free-text writing surface anywhere in the app — every exercise and every practice interaction
-  is tap-only (§3.2.2); a learner who wants open-ended writing practice is out of scope for v1.
+- No true phoneme-level pronunciation scoring — the Learn & Practice `pronunciation` exercise type
+  (§3.2.2) and the Call's post-call "pronunciation" rubric category are both best-effort heuristics
+  (recognized-transcript word-overlap for the former, LLM judgment from the transcript for the
+  latter), not a certified pronunciation-assessment product; `SpeechRecognition` doesn't reliably
+  expose acoustic confidence for either to lean on instead.
+- No free-text writing surface anywhere in the app — every exercise and practice interaction is
+  answered by tapping or speaking a sentence aloud (§3.2.2), never typed; a learner who wants
+  open-ended writing practice is out of scope for v1.
 
 ## 7. Usage limits
 
 The app runs entirely on free tiers (LLM API free quota, browser-native speech). There is no
 billing/upgrade path in v1 — when the daily/monthly free-tier limit on the LLM proxy is hit, the
 Call and "Generate a new unit" simply show a clear "come back tomorrow" message. Every exercise in
-Learn & Practice (multiple-choice, fill-in-the-blank, translation, production) keeps working
+Learn & Practice (multiple-choice, fill-in-the-blank, translation, pronunciation) keeps working
 regardless, since none of them call the LLM (§3.2.2) — only the Call, word/sentence translation,
 and generating a brand-new unit need it, so a learner can always keep progressing through whatever
 units already exist even if the daily quota is exhausted.
+
+The **Progress dashboard's AI usage card** keeps the learner aware of that usage without counting
+calls by hand: per-request counts (total, today, and broken down by request type — call reply,
+call results, translation, lesson Q&A, drills, generated units, connection tests) are tracked
+client-side in `localStorage` (`src/lib/usage.js`, `tef:usage:v1`, global like settings), alongside
+an **AI provider card** showing which provider is active, whether a bring-your-own key is
+configured, and the result of the last "Test connection" run (§5). A compact **AI provider status
+widget sits permanently in `AppSidebar`** above the target-level card, so the active provider,
+its connection-status dot (green connected / red key rejected / amber quota / gray not-tested), and
+today's request count stay in view on every screen — clicking it opens Settings. Call counts only,
+deliberately — the proxy doesn't return token counts, so tokens/cost are out of scope. This is
+awareness tooling, not a billing meter: the free-tier outcome above (a clear "come back tomorrow"
+message) is unchanged.

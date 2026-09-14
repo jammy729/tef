@@ -1,27 +1,18 @@
 import { useMemo, useState } from 'react'
 import { Volume2 } from 'lucide-react'
 import { tutorRequest } from '../lib/llm'
+import { speakFrench } from '../lib/audio'
 
 // Module-level cache — translations are cheap/tiny (spec §5) but no need to re-fetch the same
 // word/sentence twice in a session.
 const translationCache = new Map()
 
-async function fetchTranslation(text) {
+export async function fetchTranslation(text) {
   if (translationCache.has(text)) return translationCache.get(text)
   const { ok, data } = await tutorRequest({ type: 'translate', text })
   if (!ok || !data.translation) return null
   translationCache.set(text, data.translation)
   return data.translation
-}
-
-function speak(text) {
-  if (typeof window === 'undefined' || !('speechSynthesis' in window)) return
-  const utterance = new SpeechSynthesisUtterance(text)
-  utterance.lang = 'fr-FR'
-  const voices = window.speechSynthesis.getVoices()
-  const voice = voices.find((v) => v.lang === 'fr-FR') ?? voices.find((v) => v.lang?.startsWith('fr'))
-  if (voice) utterance.voice = voice
-  window.speechSynthesis.speak(utterance)
 }
 
 // Splits into word tokens and non-word tokens (spaces/punctuation) — only word tokens are
@@ -48,14 +39,14 @@ export default function InteractiveText({ passage }) {
   )
 
   const handleWordClick = async (token) => {
-    speak(token)
+    speakFrench(token)
     setWordPopover({ token, translation: null, loading: true })
     const translation = await fetchTranslation(token)
     setWordPopover((prev) => (prev?.token === token ? { token, translation, loading: false } : prev))
   }
 
   const handleSentencePlay = async (sentence) => {
-    speak(sentence)
+    speakFrench(sentence)
     setOpenSentence(sentence)
     if (!sentenceTranslations[sentence]) {
       const translation = await fetchTranslation(sentence)

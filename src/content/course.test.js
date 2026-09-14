@@ -5,8 +5,10 @@ import { test } from 'bun:test'
 
 import { COURSE, LEARNING_ITEMS, getAllLessons, getAllUnits, getLesson, getUnit, getReviewExercises, learningItem } from './course'
 
-const TAP_ONLY_TYPES = ['multiple_choice', 'fill_blank', 'translation', 'production']
+const EXERCISE_TYPES = ['multiple_choice', 'fill_blank', 'translation', 'pronunciation']
 const STAGES = ['recognition', 'recall', 'context', 'transformation', 'completion', 'production']
+const CONJUGATION_FORMS = ['je', 'tu', 'ilElle', 'nous', 'vous', 'ilsElles']
+const AGREEMENT_FORMS = ['masculineSingular', 'feminineSingular', 'masculinePlural', 'femininePlural']
 const LEVEL_COUNT = 15
 
 test('course has one level of hand-authored units covering all TEF themes', () => {
@@ -28,10 +30,13 @@ test('every unit/lesson/item/exercise has a non-empty id and the shape consumers
       assert.ok(Array.isArray(lesson.exercises) && lesson.exercises.length >= 6, `lesson ${lesson.id} needs >= 6 exercises`)
       for (const exercise of lesson.exercises) {
         assert.ok(exercise.id, `exercise without id in ${lesson.id}`)
-        assert.ok(TAP_ONLY_TYPES.includes(exercise.type), `${exercise.id}: type ${exercise.type} is not tap-only`)
+        assert.ok(EXERCISE_TYPES.includes(exercise.type), `${exercise.id}: unknown exercise type ${exercise.type}`)
         assert.ok(STAGES.includes(exercise.stage), `${exercise.id}: unknown stage ${exercise.stage}`)
-        if (exercise.type === 'production') {
-          assert.ok(Array.isArray(exercise.content.tiles) && exercise.content.tiles.length >= 4, `${exercise.id}: production needs tiles`)
+        if (exercise.type === 'pronunciation') {
+          assert.ok(
+            typeof exercise.content.sentence === 'string' && exercise.content.sentence.length > 0,
+            `${exercise.id}: pronunciation needs content.sentence`,
+          )
         } else {
           assert.ok(Array.isArray(exercise.content.options) && exercise.content.options.length >= 2, `${exercise.id}: needs options`)
         }
@@ -57,6 +62,33 @@ test('every learningItemId used resolves to a real item, and item ids are global
   for (const [key, item] of Object.entries(LEARNING_ITEMS)) {
     assert.equal(item.id, key, `item key ${key} must match its id`)
     assert.ok(['vocabulary', 'phrase', 'grammar'].includes(item.type), `${item.id}: unknown type ${item.type}`)
+    const variants = item.conjugation ?? item.agreement ?? null
+    if (item.conjugation) {
+      for (const form of CONJUGATION_FORMS) {
+        assert.ok(
+          typeof item.conjugation[form] === 'string' && item.conjugation[form].length > 0,
+          `${item.id}: conjugation missing non-empty ${form} form`,
+        )
+      }
+      assert.ok(
+        item.conjugation.tense === undefined || ['present', 'conditional'].includes(item.conjugation.tense),
+        `${item.id}: unknown conjugation tense ${item.conjugation.tense}`,
+      )
+    }
+    if (item.agreement) {
+      for (const form of AGREEMENT_FORMS) {
+        assert.ok(
+          typeof item.agreement[form] === 'string' && item.agreement[form].length > 0,
+          `${item.id}: agreement missing non-empty ${form} form`,
+        )
+      }
+    }
+    if (variants) {
+      assert.ok(
+        item.type !== 'grammar',
+        `${item.id}: grammar items should not carry a conjugation/agreement table`,
+      )
+    }
   }
 })
 

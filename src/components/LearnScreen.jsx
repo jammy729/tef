@@ -14,9 +14,9 @@ import { tutorRequest } from '../lib/llm'
 import { llmErrorKey } from '../lib/errors'
 
 // The learning path (spec §3.3) — units/lessons with locked/unlocked/done state, a "continue
-// learning" shortcut, and the daily-practice/review-queue entry point. A router isn't part of
-// this app's architecture (spec §5), so /learn, /learn/:lessonId etc. from the original proposal
-// become view-state navigation like every other screen, not URL routes.
+// learning" shortcut, and the daily-practice/review-queue entry point. Navigation is view-state
+// (onNavigate) like every other screen, kept in sync with real /learn, /lesson/:id URLs by
+// src/lib/router.js — no router library (spec §5).
 export default function LearnScreen({ active, onNavigate }) {
   const { t } = useLocale()
   const { profile } = useProfile()

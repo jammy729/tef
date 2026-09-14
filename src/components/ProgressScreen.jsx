@@ -18,6 +18,8 @@ import { callSessionLabel } from '../lib/sessionLabel'
 import { cn } from '../lib/utils'
 import { masteryLabel } from '../lib/learningEngine/mastery'
 import { learningItem } from '../content/course'
+import { getSettings, PROVIDERS } from '../lib/settings'
+import { callsByType, callsToday, getUsage } from '../lib/usage'
 
 function itemLabel(item) {
   if (item.type === 'vocabulary') return item.word
@@ -52,6 +54,22 @@ export default function ProgressScreen({ active, onNavigate }) {
 
   const nothingYet = sessions.length === 0 && masteryRows.length === 0
 
+  // App-level (not per-profile) AI provider status + usage — see src/lib/usage.js (spec §6).
+  const settings = getSettings()
+  const activeProvider = PROVIDERS.find((p) => p.id === settings.provider) ?? PROVIDERS[0]
+  const apiKeyConfigured = Boolean(settings.apiKeys[settings.provider]?.trim())
+  const usage = getUsage()
+  const byType = callsByType(usage)
+  const usageTypes = Object.keys(byType).sort()
+  const testDot =
+    usage.lastTest?.status === 'ok'
+      ? 'bg-success'
+      : usage.lastTest?.status === 'auth'
+        ? 'bg-destructive'
+        : usage.lastTest?.status === 'quota'
+          ? 'bg-warning'
+          : 'bg-muted-foreground/50'
+
   return (
     <div className="flex h-svh w-full overflow-hidden bg-background">
       <AppSidebar active={active} onNavigate={onNavigate} />
@@ -63,6 +81,77 @@ export default function ProgressScreen({ active, onNavigate }) {
         </header>
 
         <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-8 p-6 md:p-10">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <section>
+              <h2 className="text-h2">{t('progress.provider.title')}</h2>
+              <div className="mt-4 rounded-xl border border-border bg-card p-4">
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-muted-foreground">{t('progress.provider.active')}</span>
+                  <span className="font-medium">{t(activeProvider.labelKey)}</span>
+                </div>
+                <div className="mt-2.5 flex items-center justify-between text-sm">
+                  <span className="text-muted-foreground">{t('progress.provider.key')}</span>
+                  <span
+                    className={cn(
+                      'flex items-center gap-1.5',
+                      apiKeyConfigured ? 'text-foreground' : 'text-muted-foreground',
+                    )}
+                  >
+                    <span className={cn('size-2 rounded-full', apiKeyConfigured ? 'bg-success' : 'bg-muted-foreground/50')} />
+                    {t(apiKeyConfigured ? 'progress.provider.keyConfigured' : 'progress.provider.keyMissing')}
+                  </span>
+                </div>
+                <div className="mt-2.5 flex items-center justify-between text-sm">
+                  <span className="text-muted-foreground">{t('progress.provider.lastTest')}</span>
+                  {usage.lastTest ? (
+                    <span className="flex items-center gap-1.5 font-medium">
+                      <span className={cn('size-2 rounded-full', testDot)} />
+                      {t(`progress.provider.test.${usage.lastTest.status}`)}
+                    </span>
+                  ) : (
+                    <span className="text-muted-foreground">{t('progress.provider.testNever')}</span>
+                  )}
+                </div>
+                <div className="mt-4">
+                  <Button size="sm" variant="soft" onClick={() => onNavigate('settings')}>
+                    {t('progress.provider.goToSettings')}
+                  </Button>
+                </div>
+              </div>
+            </section>
+
+            <section>
+              <h2 className="text-h2">{t('progress.usage.title')}</h2>
+              <div className="mt-4 rounded-xl border border-border bg-card p-4">
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="rounded-lg bg-muted px-3 py-2 text-center">
+                    <p className="font-serif text-xl font-semibold text-primary">{usage.calls.length}</p>
+                    <p className="text-xs text-muted-foreground">{t('progress.usage.total')}</p>
+                  </div>
+                  <div className="rounded-lg bg-muted px-3 py-2 text-center">
+                    <p className="font-serif text-xl font-semibold text-primary">{callsToday(usage)}</p>
+                    <p className="text-xs text-muted-foreground">{t('progress.usage.today')}</p>
+                  </div>
+                </div>
+                {usageTypes.length > 0 ? (
+                  <>
+                    <p className="label-caps mt-3">{t('progress.usage.byType')}</p>
+                    <ul className="mt-1.5 flex flex-col gap-1.5 text-sm">
+                      {usageTypes.map((type) => (
+                        <li key={type} className="flex items-center justify-between">
+                          <span className="text-muted-foreground">{t(`usage.type.${type}`)}</span>
+                          <span className="font-medium">{byType[type]}×</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </>
+                ) : (
+                  <p className="mt-3 text-sm text-muted-foreground">{t('progress.usage.empty')}</p>
+                )}
+              </div>
+            </section>
+          </div>
+
           {nothingYet ? (
             <p className="text-sm text-muted-foreground">{t('progress.empty')}</p>
           ) : (

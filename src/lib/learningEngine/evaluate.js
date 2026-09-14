@@ -1,6 +1,6 @@
-// Answer evaluation per exercise type (spec §3.2) — every exercise is tap-only (multiple choice,
-// a word-bank chip, or ordered word tiles), so every check here is a plain synchronous string
-// comparison. No LLM call in the exercise-answering path at all.
+// Answer evaluation per exercise type (spec §3.2) — multiple choice/fill-blank/translation are
+// tap-only (a word-bank chip), pronunciation is spoken; every check here is a plain synchronous
+// comparison against the recognized/tapped answer. No LLM call in the exercise-answering path.
 export function normalize(s) {
   return String(s ?? '')
     .trim()
@@ -28,10 +28,24 @@ export function evaluateTranslation(exercise, given) {
   return evaluateFillBlank(exercise, given)
 }
 
-// Production: the learner builds a sentence by tapping word tiles in order; `given` is the tiles
-// joined with spaces. Compared the same normalized way as fill-blank/translation.
-export function evaluateProduction(exercise, given) {
-  return normalize(given) === normalize(exercise.answer)
+// Pronunciation: the learner speaks the target sentence; `given` is whatever SpeechRecognition
+// transcribed. True phoneme-level scoring is out of scope (spec §6 non-goal) and this app has no
+// acoustic confidence signal to lean on either (browsers don't expose one reliably), so this is a
+// text-similarity heuristic instead — the closest honest proxy available client-side: an exact
+// normalized match passes immediately; otherwise, if the recognizer heard most of the same words
+// (>= 70% word overlap against the target), that's close enough to call it understood. ponytail:
+// word-overlap, not edit-distance or real pronunciation scoring — revisit if this proves too
+// lenient/strict in practice.
+export function evaluatePronunciation(exercise, given) {
+  const target = normalize(exercise.answer)
+  const said = normalize(given)
+  if (!said) return false
+  if (said === target) return true
+  const targetWords = target.split(' ').filter(Boolean)
+  if (!targetWords.length) return false
+  const saidWords = new Set(said.split(' ').filter(Boolean))
+  const matched = targetWords.filter((w) => saidWords.has(w)).length
+  return matched / targetWords.length >= 0.7
 }
 
 export function evaluateExercise(exercise, given) {
@@ -42,8 +56,8 @@ export function evaluateExercise(exercise, given) {
       return evaluateFillBlank(exercise, given)
     case 'translation':
       return evaluateTranslation(exercise, given)
-    case 'production':
-      return evaluateProduction(exercise, given)
+    case 'pronunciation':
+      return evaluatePronunciation(exercise, given)
     default:
       return false
   }

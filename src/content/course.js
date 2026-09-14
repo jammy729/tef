@@ -84,6 +84,22 @@ export function getReviewExercises(itemIds) {
   return itemIds.map((id) => byItem.get(id)).filter(Boolean)
 }
 
+// A short onboarding placement quiz (spec §4): a handful of already-authored exercises, one per
+// learning item, easier (A2) items first then harder (B1) ones — the only two CEFR levels this
+// content actually carries, so the result is a rough two-band signal, not a full CEFR placement.
+export function getPlacementExercises(countPerLevel = 4) {
+  const allExercises = getAllLessons().flatMap((lesson) => lesson.exercises)
+  const seenItems = new Set()
+  const byLevel = { A2: [], B1: [] }
+  for (const exercise of allExercises) {
+    const item = LEARNING_ITEMS[exercise.learningItemId]
+    if (!item || seenItems.has(item.id) || !byLevel[item.level]) continue
+    seenItems.add(item.id)
+    byLevel[item.level].push(exercise)
+  }
+  return [...byLevel.A2.slice(0, countPerLevel), ...byLevel.B1.slice(0, countPerLevel)]
+}
+
 export function learningItem(id) {
   return LEARNING_ITEMS[id] ?? getGeneratedItem(id) ?? null
 }

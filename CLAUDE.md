@@ -49,39 +49,74 @@ passing conversation, or in code — update the documentation in the same turn, 
 
 The app is a single Vite + React (JS, not TS) SPA. Both features in the spec are built and wired to
 real data: Learn & Practice (§3.2, `LearnScreen`/`LessonScreen`, the default-landing view) is a
-tap-only curriculum — every exercise is `ChoiceBank` chips or `TileBuilder` word tiles, never a text
-input — with mastery tracking, a spaced review queue, and a "Generate a new unit" action that grows
-the course via the LLM; the Call (§3.1, `CallScreen`/`HistoriqueScreen`/`ObjectifScreen`) is a
+tap-or-speak-only curriculum — every exercise is `ChoiceBank` chips or `SpeakingPrompt`'s mic
+button, never a text input — run as a two-phase lesson (a sequential Learn session that steps one
+item at a time through its full conjugation/agreement forms, each form tap-to-hear and the new term
+auto-spoken on entry; then a Practice session that also folds in an LLM-generated batch spread
+across those forms), each lesson carrying an "Ask your AI tutor" free-form Q&A panel at the bottom
+of every stage (`LessonAsk.jsx`, spec §3.2.7 — the one deliberate text input, since comprehension
+Q&A isn't an exercise) — with mastery tracking, a spaced review queue, and a "Generate a new unit"
+action that grows the course via the LLM; the Call (§3.1, `CallScreen`/`HistoriqueScreen`/`ObjectifScreen`) is a
 Free/Task A/Task B/Mock exam voice conversation, themed (not gated) by the learner's mastered
-expressions from Learn & Practice. `ProgressScreen` (§6) gives a combined per-profile dashboard.
-Not built: a profile-picker gating screen (deliberately — see §4), in-call stuck/guidance
-detection, the full Task A/B scenario library beyond a first-pass set, and personalization actually
-*biasing* scenario/topic selection (today it's manual pick + informed labels + mastered-expression
-theming only) — check `spec/ROADMAP.md` for the exact state of every phase.
+expressions from Learn & Practice, opening with a mode-aware spoken French greeting
+(`useVoiceCall.greet()`, free/Task A/Task B/mock) so the learner is never dropped into dead
+silence. `ProgressScreen` (§6) gives a combined per-profile dashboard with an AI provider status
+  card (active provider, key-configured status, last connection-test result) and an AI usage card
+  (total/today request counts by type), and `AppSidebar` mirrors the provider status as a compact
+  always-visible widget (provider + connection-status dot + today's request count) above the
+  target-level card. `OnboardingScreen` (§4) is a
+real Supabase Auth sign-in/sign-up gate (`App.jsx`'s `Router` renders it whenever there's no
+session or the account hasn't finished local setup) followed by a one-time local setup step (name
++ self-assessed starting level) — `profile.onboarded` gates the second stage, not the first.
+Not built: OAuth/social login, MFA, password-reset UI beyond Supabase's hosted flow (deliberately
+— see §4/§6), in-call stuck/guidance detection, the full Task A/B scenario library beyond a
+first-pass set, and personalization actually *biasing* scenario/topic selection (today it's manual
+pick + informed labels + mastered-expression theming only) — check `spec/ROADMAP.md` for the exact
+state of every phase.
 
 Key architectural decisions locked in by the spec (see `spec/PRODUCT_SPEC.md` §5 for full detail):
 
-- **No client-side state library and no backend database.** State is React context
-  (`ProfileProvider` in `src/lib/profiles.jsx`, `LocaleProvider` in `src/lib/i18n/LocaleContext.jsx`);
-  persistence is `localStorage` via `src/lib/storage.js`, scoped per learner profile (there are
-  exactly two static local profiles, no auth, switched from the sidebar — no gating picker screen).
+- **No client-side state library, but a real backend database now: Supabase.** State is React
+  context (`ProfileProvider` in `src/lib/profiles.jsx`, `LocaleProvider` in
+  `src/lib/i18n/LocaleContext.jsx`). Accounts + progress persist in Supabase — one table,
+  `public.profiles` (`id` = the Supabase Auth user id, `data jsonb` mirroring the exact shape
+  `src/lib/storage.js` used to keep in `localStorage`), RLS-locked to `auth.uid() = id`
+  (`supabase/migrations/`). `storage.js` still exposes every function **synchronously** (no
+  loading states scattered through the app) via an in-memory cache hydrated once from Supabase
+  right after sign-in and written back with a debounced (~800ms) background upsert — see §5 for
+  the full design and its stated ceiling (no offline queue, no cross-tab conflict resolution).
+  `src/lib/supabase/client.js` exports one shared client singleton (`@supabase/ssr`'s
+  `createBrowserClient`) — never call `createClient()` a second time, both `storage.js` and
+  `profiles.jsx` import the same `supabase` export. Each profile also has a small `meta` blob
+  (`getProfileMeta`/`setProfileMeta`) — display name, self-assessed starting level, `onboarded`
+  flag — written once by `OnboardingScreen`'s local-setup step (§4), now stored inside the
+  Supabase-backed blob rather than `localStorage`. `src/lib/settings.js` (BYOK LLM keys),
+  `src/lib/generatedContent.js` (shared AI-generated curriculum), and `src/lib/usage.js`
+  (client-side LLM usage counts for the Progress dashboard, spec §7) are deliberately **not**
+  migrated — none is "user or progress" data.
 - **Voice is entirely browser-native.** Speech-to-text uses the Web `SpeechRecognition` API and
   playback uses `speechSynthesis` — no third-party speech SDK. This only works in
   Chromium-based browsers (Chrome/Edge); the app must degrade with a clear message elsewhere.
 - **The only "backend" is a single LLM proxy endpoint** (`api/tutor.js`). It exists to keep the
   app's own API key server-side (never bundled into the client) and to front a choose-your-provider
   setup. It's one small serverless-style handler, not a server framework. It's request-type-driven,
-  all six types sharing one provider-dispatching JSON-mode helper (`callLLM`): `type: "turn"`
+  all eight types sharing one provider-dispatching JSON-mode helper (`callLLM`): `type: "turn"`
   (tutor's next reply + an inline structured `correction` — `{said, correction, reason, category,
   rule, examples, practice: {prompt, answer, options}}`, themed by `topic`/`mode`/`scenarioId` for
   Task A/B/mock and by `masteredExpressions` from Learn & Practice), `type: "score"` (finished call
   transcript → rubric scores/focusAreas/strengths/vocabSuggestions), `type: "translate"` (Learn's
-  click-to-hear/gloss interaction), `type: "drill"` (a weak category → fresh tap-only exercises,
-  `options` built server-side, for the Mistake Bank), `type: "generateUnit"` (Learn & Practice:
-  grow the curriculum with a new AI-generated unit, validated server-side before being returned),
-  and `type: "test"` (Settings screen's "Test connection" button: a zero-content JSON ping through
-  the learner's selected provider + key/.env fallback, so the match is confirmed before relying on
-  the provider). In-call stuck/guidance detection is specced but not built (nothing in the UI
+  click-to-hear/gloss interaction), `type: "ask"` (the lesson's "Ask your AI tutor" free-form Q&A,
+  spec §3.2.7 — `{question, lessonTitle, itemTerm, locale}` → `{answer}` in the UI locale; the
+  question is bounded and stays in the `user` role, never the system prompt), `type: "drill"` (a
+  weak category → fresh tap-only exercises, `options` built server-side, for the Mistake Bank),
+  `type: "itemDrill"` (one Learn & Practice
+  learning item's "Practice more" button → fresh exercises in the richer `generateUnit` shape, run
+  through `ExerciseRunner` — `id`/`learningItemId` assigned server-side, never trusted from the
+  model), `type: "generateUnit"` (Learn & Practice: grow the curriculum with a new AI-generated
+  unit, validated server-side before being returned), and `type: "test"` (Settings screen's "Test
+  connection" button: a zero-content JSON ping through the learner's selected provider + key/.env
+  fallback, so the match is confirmed before relying on the provider). In-call stuck/guidance
+  detection is specced but not built (nothing in the UI
   surfaces it) — deliberately kept to one endpoint rather than one per concern. A provider `429`
   maps to a distinct `quota_exceeded` error code so the client can tell quota exhaustion from a
   generic failure.
@@ -110,18 +145,30 @@ Key architectural decisions locked in by the spec (see `spec/PRODUCT_SPEC.md` §
   `.env` fallback keys are backfilled into `process.env` from Vite's `loadEnv` so the handler finds
   them under any runner. Deployment targets that host the handler themselves (a real serverless
   function) don't use the plugin — the handler signature stays plain `(req, res)` Express-style.
-- **No exercise or practice interaction anywhere in the app accepts typed text.** Every exercise
-  (multiple choice, fill-in-the-blank, translation, production) is answered by tapping —
-  `ChoiceBank` (chip selection) or `TileBuilder` (ordered word tiles for "build the sentence").
-  `production` exercises used to be free-form and LLM-evaluated; they're now tile-based and
-  evaluated locally by `src/lib/learningEngine/evaluate.js`'s `evaluateProduction` (string
-  normalize + compare) — don't reintroduce an `<input>`/`<textarea>` into this flow, and don't
-  reintroduce an LLM call into answer evaluation.
+- **No exercise or practice interaction anywhere in the app accepts typed text.** Multiple choice/
+  fill-in-the-blank/translation are answered by tapping `ChoiceBank` (chip selection);
+  `pronunciation` exercises (`SpeakingPrompt.jsx`) are answered by speaking the target sentence
+  aloud via the Web `SpeechRecognition` API (fr-FR, one attempt per tap) — spoken, not typed, and
+  still not a text input. Both are evaluated locally by `src/lib/learningEngine/evaluate.js`
+  (`evaluateFillBlank`/`evaluateTranslation`: string normalize + compare; `evaluatePronunciation`:
+  a word-overlap heuristic over the recognized transcript, not true phoneme-level scoring — see
+  spec §6) — don't reintroduce an `<input>`/`<textarea>`, and don't reintroduce an LLM call into
+  answer evaluation. The sole exception is `LessonAsk.jsx`'s question box (spec §3.2.7): typed
+  user-initiated comprehension Q&A is neither an exercise nor an answer path, so it's the app's
+  only text input — don't let typing legitimize a text input on any exercise or answer-evaluation
+  path. The former tile-based "production" exercise type (`TileBuilder`) was replaced
+  by `pronunciation` everywhere (all hand-authored content migrated, `api/tutor.js`'s generation
+  prompts updated) — don't reintroduce it.
 - **Lesson content is static data plus an AI-generated extension**, not fetched from a CMS/
   database — the curriculum is hand-authored once, one module per unit under
   `src/content/units/` (the "Expressing Opinions" foundation unit plus a unit for every official
   TEF theme: each 3 lessons — Vocabulaire / Construire des idées / Argumenter — with ~12-15
-  learning items and 18 tap-only exercises), assembled by `src/content/course.js`, a thin
+  learning items and 18 tap-only exercises); verb/adjective/expression items carry optional
+  `conjugation`/`agreement` variant tables (person forms je/tu/il-elle/nous/vous/ils-elles, or
+  gender/number agreement; optional `tense` on the table for non-present phrases like _je
+  voudrais_; cells needing elision/clitics are authored as full phrases including the subject
+  — e.g. "J'ai mal à" — which `FormsGrid` renders/speaks as-is rather than doubling the label,
+  see spec §3.2.1), assembled by `src/content/course.js`, a thin
   assembler that builds `COURSE`/`LEARNING_ITEMS` and exposes the lookup functions. Also home to
   `scenarios.js`'s Task A/B prompts, imported directly by both `ObjectifScreen` and `api/tutor.js`
   so scenario text never drifts between what the learner reads and what the tutor is prompted
@@ -169,7 +216,8 @@ Key architectural decisions locked in by the spec (see `spec/PRODUCT_SPEC.md` §
   never a silent failure or a raw stack trace.
 - **Accessibility is not optional, on the call UI or Learn & Practice**: the mic control needs a
   real `aria-label`, the live transcript region needs `aria-live` so screen readers announce new
-  turns; `ChoiceBank`/`TileBuilder`'s tappable chips/tiles are real `<button>`s, reachable/announced
+  turns; `ChoiceBank`'s tappable chips, `SpeakingPrompt`'s mic button, and `FormsGrid`'s
+  tap-to-hear form cells are real `<button>`s, reachable/announced
   like any other control, not divs with a click handler. Every interactive control must be
   reachable/operable by keyboard, not just click/tap.
 - **Never run the app's EN/FR i18n over tutor/learner content.** `t()` (`src/lib/i18n/`) is for the
@@ -177,9 +225,10 @@ Key architectural decisions locked in by the spec (see `spec/PRODUCT_SPEC.md` §
   the learner's own transcript, and the flagged text/corrected form/exercise content of any
   correction or exercise must always render as the raw French they came as, regardless of the UI
   locale — that content is the subject being taught, not chrome. The deliberate exceptions are a
-  correction's short *reason* and its "Why?" **rule** explanation (spec §3.1.3) — instructional
+  correction's short *reason* and its "Why?" **rule** explanation (spec §3.1.3) and the lesson
+  Q&A's generated `answer` (spec §3.2.7) — instructional
   metadata, not graded content, so they're generated in the current `locale` (sent with `type:
-  "turn"`/`"drill"`/`"generateUnit"` requests). Everything else — `examples`, exercise
+  "turn"`/`"drill"`/`"generateUnit"`/`"ask"` requests). Everything else — `examples`, exercise
   prompts/tiles/options, AI-generated unit content — is always French, no exception. Keep new
   French-content strings out of the i18n dictionaries entirely so this boundary can't blur by
   accident.
@@ -192,7 +241,12 @@ Key architectural decisions locked in by the spec (see `spec/PRODUCT_SPEC.md` §
   the user explicitly chose for the **server-side Groq call** in `api/tutor.js` (`callGroq`): it's a
   proxy-only dependency, never imported by client code, and is the documented way to hit Groq's
   Responses API (`.responses.create`, `.output_text`). Allowed on that server side only — don't
-  extend it into client code or let it pull in a habit of SDK-per-provider.
+  extend it into client code or let it pull in a habit of SDK-per-provider. **`@supabase/supabase-js`
+  + `@supabase/ssr`** are a third exception, explicitly chosen for accounts + progress persistence
+  (§4/§5) — unlike the `openai` SDK, these run **client-side** (the publishable key is designed for
+  that, RLS is the real boundary), since Supabase auth/session management and RLS-aware queries
+  aren't something to hand-roll. One shared client singleton (`src/lib/supabase/client.js`) — don't
+  call `createClient()` more than once.
 - **Run `bun run lint` clean before considering any change done.** No leftover `console.log`
   debugging output or dead code in committed changes.
 - **Don't commit `.env` or any real API key/secret** — verify `git status`/`git diff` before

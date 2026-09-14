@@ -1,9 +1,11 @@
-import { BarChart3, BookOpen, GraduationCap, History, MessageCircle, Phone, Settings } from 'lucide-react'
+import { BarChart3, BookOpen, GraduationCap, History, LogOut, MessageCircle, Phone, Settings } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { useProfile } from '../lib/profiles'
 import { useLocale } from '../lib/i18n/LocaleContext'
 import { getSessions } from '../lib/storage'
 import { goalPercent } from '../lib/rubric'
+import { getSettings, PROVIDERS } from '../lib/settings'
+import { callsToday, getUsage } from '../lib/usage'
 
 const NAV_ITEMS = [
   { icon: BookOpen, labelKey: 'nav.learn', view: 'learn' },
@@ -17,9 +19,34 @@ const NAV_ITEMS = [
 // ponytail: target level is fixed at B2 → C1 (spec's TEF Canada framing) — only the % is real,
 // derived from recent scores. A per-profile custom target is a Réglages-screen feature, not built.
 export default function AppSidebar({ active, onNavigate }) {
-  const { profile, switchProfile } = useProfile()
-  const { locale, setLocale, t } = useLocale()
+  const { profile, signOut } = useProfile()
+  const { t } = useLocale()
   const pct = goalPercent(getSessions(profile.id))
+
+  // Always-visible AI provider status (spec §5/§7): active provider, connection-status dot, and
+  // today's request count — kept above the target-level card so usage stays in view on every screen.
+  const settings = getSettings()
+  const activeProvider = PROVIDERS.find((p) => p.id === settings.provider) ?? PROVIDERS[0]
+  const lastTestStatus = getUsage().lastTest?.status ?? null
+  const todayCalls = callsToday()
+  const statusKey =
+    lastTestStatus === 'ok'
+      ? 'sidebar.providerStatusOk'
+      : lastTestStatus === 'auth'
+        ? 'sidebar.providerStatusAuth'
+        : lastTestStatus === 'quota'
+          ? 'sidebar.providerStatusQuota'
+          : lastTestStatus === 'generic'
+            ? 'sidebar.providerStatusGeneric'
+            : 'sidebar.providerStatusNone'
+  const statusDot =
+    lastTestStatus === 'ok'
+      ? 'bg-success'
+      : lastTestStatus === 'auth'
+        ? 'bg-destructive'
+        : lastTestStatus === 'quota'
+          ? 'bg-warning'
+          : 'bg-white/25'
 
   return (
     <aside className="hidden h-full w-64 shrink-0 flex-col justify-between overflow-y-auto border-r border-border bg-sidebar px-4 py-6 md:flex">
@@ -64,6 +91,25 @@ export default function AppSidebar({ active, onNavigate }) {
       </div>
 
       <div className="flex flex-col gap-3">
+        <button
+          type="button"
+          onClick={() => onNavigate('settings')}
+          title={t(statusKey)}
+          className="rounded-xl bg-sidebar-dark px-4 py-4 text-left text-sidebar-dark-foreground"
+        >
+          <span className="flex items-center justify-between">
+            <span className="label-caps text-primary">{t('sidebar.providerLabel')}</span>
+            <span className={cn('size-2 rounded-full', statusDot)} aria-hidden="true" />
+          </span>
+          <span className="mt-1 flex items-baseline justify-between gap-2">
+            <span className="font-serif text-lg font-semibold">{t(activeProvider.labelKey)}</span>
+            <span className="text-xs text-sidebar-dark-foreground/60">
+              {t('sidebar.providerToday', { n: todayCalls })}
+            </span>
+          </span>
+          <span className="mt-0.5 block text-xs text-sidebar-dark-foreground/60">{t(statusKey)}</span>
+        </button>
+
         <div className="rounded-xl bg-sidebar-dark px-4 py-4 text-sidebar-dark-foreground">
           <p className="label-caps text-primary">{t('sidebar.goalLabel')}</p>
           <p className="mt-1 font-serif text-lg font-semibold">B2 → C1</p>
@@ -75,42 +121,20 @@ export default function AppSidebar({ active, onNavigate }) {
           </p>
         </div>
 
-        <button
-          type="button"
-          onClick={switchProfile}
-          aria-label={t('sidebar.switchProfileAria')}
-          className="flex items-center gap-2 rounded-full px-1 py-1 text-left hover:bg-muted"
-        >
-          <span className="flex size-8 items-center justify-center rounded-full bg-accent text-sm font-medium text-accent-foreground">
+        <div className="flex items-center gap-2 rounded-full px-1 py-1">
+          <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-accent text-sm font-medium text-accent-foreground">
             {profile.initials}
           </span>
-          <div className="min-w-0">
-            <p className="truncate text-sm font-medium">{profile.name}</p>
-            <p className="truncate text-xs text-muted-foreground">
-              {t('sidebar.examGoal', { date: profile.examDate })}
-            </p>
-          </div>
-        </button>
-
-        <div
-          role="group"
-          aria-label={t('sidebar.localeAria')}
-          className="flex overflow-hidden rounded-full border border-border text-xs font-medium"
-        >
-          {['en', 'fr'].map((l) => (
-            <button
-              key={l}
-              type="button"
-              aria-pressed={locale === l}
-              onClick={() => setLocale(l)}
-              className={cn(
-                'flex-1 py-1.5 uppercase transition-colors',
-                locale === l ? 'bg-accent text-primary' : 'text-muted-foreground hover:bg-muted',
-              )}
-            >
-              {l}
-            </button>
-          ))}
+          <p className="min-w-0 flex-1 break-words text-sm font-medium">{profile.name}</p>
+          <button
+            type="button"
+            onClick={signOut}
+            aria-label={t('sidebar.logoutAria')}
+            title={t('sidebar.logoutAria')}
+            className="flex size-7 shrink-0 items-center justify-center rounded-full text-muted-foreground hover:bg-muted hover:text-foreground"
+          >
+            <LogOut className="size-4" />
+          </button>
         </div>
       </div>
     </aside>

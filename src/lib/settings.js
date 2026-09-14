@@ -16,8 +16,10 @@ export const PROVIDERS = [
   { id: 'custom', labelKey: 'settings.provider.custom', noteKey: 'settings.provider.custom.note' },
 ]
 
+export const DEFAULT_VOICE = { rate: 1, gender: 'female' }
+
 export function defaultSettings() {
-  return { provider: DEFAULT_PROVIDER, apiKeys: {}, custom: { baseUrl: '', model: '' } }
+  return { provider: DEFAULT_PROVIDER, apiKeys: {}, custom: { baseUrl: '', model: '' }, voice: DEFAULT_VOICE }
 }
 
 export function getSettings() {
@@ -34,7 +36,9 @@ export function getSettings() {
       baseUrl: typeof parsed.custom?.baseUrl === 'string' ? parsed.custom.baseUrl : '',
       model: typeof parsed.custom?.model === 'string' ? parsed.custom.model : '',
     }
-    return { provider, apiKeys, custom }
+    const rate = typeof parsed.voice?.rate === 'number' ? Math.min(1.5, Math.max(0.5, parsed.voice.rate)) : DEFAULT_VOICE.rate
+    const gender = parsed.voice?.gender === 'male' ? 'male' : 'female'
+    return { provider, apiKeys, custom, voice: { rate, gender } }
   } catch {
     return defaultSettings()
   }
@@ -45,6 +49,10 @@ export function saveSettings(settings) {
     provider: settings.provider,
     apiKeys: { ...settings.apiKeys },
     custom: { baseUrl: settings.custom?.baseUrl ?? '', model: settings.custom?.model ?? '' },
+    voice: {
+      rate: typeof settings.voice?.rate === 'number' ? settings.voice.rate : DEFAULT_VOICE.rate,
+      gender: settings.voice?.gender === 'male' ? 'male' : 'female',
+    },
   }
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(clean))
 }

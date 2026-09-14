@@ -1,9 +1,12 @@
 // Single LLM proxy endpoint (spec §5) — request-type-driven, routes to the learner's chosen AI
 // provider. Request types: "turn" (next conversational reply + optional inline correction, themed
 // toward the learner's mastered expressions), "score" (end-of-call transcript → TEF rubric
-// scores), "translate" (Learn interactive text: a word/sentence → English gloss), "drill" (Mistake
-// Bank: a weak category → fresh tap-only exercises), and "generateUnit" (Learn & Practice: grow the
-// curriculum with a new AI-generated unit).
+// scores), "translate" (Learn interactive text: a word/sentence → English gloss), "ask" (lesson's
+// "Ask your AI tutor": a free-form learner question about a lesson → a teaching answer), "drill"
+// (Mistake Bank: a weak category → fresh tap-only exercises), "itemDrill" (Learn & Practice: one
+// learning item → fresh ExerciseRunner-shaped exercises, "Practice more" on a vocabulary/expression/
+// grammar card), and "generateUnit" (Learn & Practice: grow the curriculum with a new AI-generated
+// unit).
 
 import OpenAI from "openai";
 import {
@@ -73,6 +76,11 @@ const MAX_TURN_CHARS = 500;
 const MAX_TRANSLATE_CHARS = 300;
 const MAX_EXPRESSION_CHARS = 60;
 const MAX_EXPRESSIONS = 5;
+const MAX_TERM_CHARS = 60;
+const MAX_MEANING_CHARS = 100;
+const MAX_LEVEL_CHARS = 10;
+const MAX_QUESTION_CHARS = 300;
+const MAX_CONTEXT_CHARS = 100;
 
 // Fixed id → French label map so a client-supplied `topic` id only ever selects a known,
 // server-controlled phrase — never interpolates raw client text into the system prompt.
@@ -210,6 +218,21 @@ const TRANSLATE_SYSTEM_PROMPT = `Tu traduis du français vers l'anglais pour un 
 te donne un mot ou une courte phrase en français. Réponds UNIQUEMENT avec un objet JSON de la forme
 {"translation": "traduction anglaise concise et naturelle"}.`;
 
+// type "ask" (spec §3.2.7) — a lesson's "Ask your AI tutor" Q&A. The answer is teaching content in
+// the learner's UI language (same boundary as a correction's reason/rule): the `question` is the
+// learner's own text and always stays in the user role, never concatenated into the system prompt
+// (same injection rule as the call transcript).
+function askSystemPrompt(locale) {
+  return `Tu es un professeur de français patient qui aide un apprenant à se préparer pour le TEF.
+L'apprenant te pose une question sur une leçon — souvent : quelle est la différence entre deux
+expressions, ou comment/ quand utiliser une expression. Réponds de façon claire et pédagogique en 2 à
+5 phrases : explique le sens et l'usage, donne la nuance, et donne 1-2 courts exemples français (des
+phrases complètes) quand ils aident. Écris ta réponse en ${metaLanguage(locale)}.
+
+Réponds UNIQUEMENT avec un objet JSON de la forme :
+{"answer": "ta réponse"}`;
+}
+
 function drillSystemPrompt(category, locale) {
   return `Tu es un professeur de français qui crée des exercices ciblés pour le TEF. L'apprenant a
 des difficultés récurrentes avec cette catégorie : "${category}". Crée 4 exercices À CHOIX
@@ -224,13 +247,44 @@ Réponds UNIQUEMENT avec un objet JSON de la forme :
 }
 
 const EXERCISE_SHAPE_NOTE = `Chaque exercice a la forme :
-{"id": "identifiant-court", "learningItemId": "id d'un des learningItems ci-dessus", "type": "multiple_choice" | "fill_blank" | "translation" | "production", "stage": "recognition" | "recall" | "context" | "completion" | "transformation" | "production", "prompt": "consigne affichée", "content": {...selon le type}, "answer": "réponse attendue (chaîne, ou tableau de réponses acceptées)", "explanation": "pourquoi c'est correct, en ${"{{META_LANGUAGE}}"}"}
+{"id": "identifiant-court", "learningItemId": "id d'un des learningItems ci-dessus", "type": "multiple_choice" | "fill_blank" | "translation" | "pronunciation", "stage": "recognition" | "recall" | "context" | "completion" | "transformation" | "production", "prompt": "consigne affichée", "content": {...selon le type}, "answer": "réponse attendue (chaîne, ou tableau de réponses acceptées)", "explanation": "pourquoi c'est correct, en ${"{{META_LANGUAGE}}"}"}
 
-L'apprenant ne tape JAMAIS de texte — chaque type a un "content" adapté à une interaction tactile :
+L'apprenant ne tape JAMAIS de texte — il touche des options ou parle à voix haute, jamais de
+clavier. Chaque type a un "content" adapté :
 - "multiple_choice" : {"options": ["...", "...", "...", "..."]} — "answer" est l'une des options exactement.
 - "fill_blank" : {"sentence": "phrase avec ________ à la place du mot manquant", "options": ["...", "...", "...", "..."]} — "answer" est l'une des options.
 - "translation" : {"direction": "en_to_fr" ou "fr_to_en", "options": ["...", "...", "...", "..."]} — "answer" est l'une des options.
-- "production" : {"tiles": ["mot1", "mot2", "...", "mot-distracteur1", "mot-distracteur2"]} (les mots de la bonne phrase, dans le désordre, plus 2-3 mots distracteurs qui n'appartiennent pas à la phrase) — "answer" est la phrase complète correcte, telle qu'elle doit être reconstituée en assemblant les bons "tiles" dans l'ordre.`;
+- "pronunciation" : {"sentence": "phrase française complète à prononcer à voix haute"} — "answer" est cette même phrase, telle qu'elle doit être reconnue par la reconnaissance vocale du navigateur.`;
+
+// One item's "Practice more" (spec §3.2): unlike EXERCISE_SHAPE_NOTE above (used by generateUnit,
+// which lists several learningItems and needs the model to say which one each exercise belongs
+// to), there's only ever one item here — the server assigns "id"/"learningItemId" itself, so the
+// model isn't asked for them at all.
+function itemDrillSystemPrompt(term, meaning, level, locale, variants) {
+  const variantsLine = variants
+    ? `\n\nCe mot a plusieurs formes grammaticales : ${JSON.stringify(variants)}. Répartis les
+exercices sur PLUSIEURS de ces formes (pas seulement "${term}") — par exemple un exercice sur une
+personne/un genre, un autre sur une autre — pour que l'apprenant pratique toutes les variantes, pas
+juste la forme de base.`
+    : "";
+  return `Tu es un professeur de français qui crée des exercices de pratique ciblés pour le TEF.
+L'apprenant (niveau ${level}) veut pratiquer davantage cette expression ou ce mot français :
+"${term}"${meaning ? ` (sens : "${meaning}")` : ""}.${variantsLine}
+
+Crée 8 exercices variés (l'apprenant ne tape JAMAIS de texte — il touche des options ou parle à
+voix haute) qui pratiquent ce terme sous plusieurs angles — reconnaissance du sens, traduction,
+phrase à trous, prononciation à voix haute — pas juste le même type répété. Chaque exercice a la
+forme :
+{"type": "multiple_choice" | "fill_blank" | "translation" | "pronunciation", "stage": "recognition" | "recall" | "context" | "completion" | "transformation" | "production", "prompt": "consigne affichée", "content": {...selon le type}, "answer": "réponse attendue", "explanation": "pourquoi c'est correct, en ${metaLanguage(locale)}"}
+
+- "multiple_choice" : {"options": ["...", "...", "...", "..."]} — "answer" est l'une des options exactement.
+- "fill_blank" : {"sentence": "phrase avec ________ à la place du mot manquant", "options": ["...", "...", "...", "..."]} — "answer" est l'une des options.
+- "translation" : {"direction": "en_to_fr" ou "fr_to_en", "options": ["...", "...", "...", "..."]} — "answer" est l'une des options.
+- "pronunciation" : {"sentence": "phrase française complète à prononcer à voix haute"} — "answer" est cette même phrase.
+
+N'inclus PAS de champs "id" ou "learningItemId". Réponds UNIQUEMENT avec un objet JSON de la forme :
+{"exercises": [{"type": "...", "stage": "...", "prompt": "...", "content": {...}, "answer": "...", "explanation": "..."}]}`;
+}
 
 function generateUnitSystemPrompt(level, existingTopics, locale) {
   const existingLine = existingTopics?.length
@@ -242,13 +296,22 @@ de niveau ${level}, sur un thème pertinent pour le TEF (vie quotidienne, travai
 technologie, logement, santé, éducation, voyages...). ${existingLine}
 
 L'unité contient 2 à 3 leçons. Chaque leçon a 3 à 6 "learningItemIds" (vocabulaire, expressions,
-ou un concept de grammaire — voir "items" ci-dessous) et 4 à 6 exercices qui les pratiquent.
+ou un concept de grammaire — voir "items" ci-dessous) et 10 à 16 exercices qui les pratiquent en
+profondeur — pas juste un exercice par item. Pour un item avec "conjugation" ou "agreement" (voir
+ci-dessous), couvre plusieurs formes à travers les exercices de la leçon (par exemple : un exercice
+teste "je" ou le masculin singulier, un autre teste "nous" ou le féminin pluriel, etc.) plutôt que
+de toujours utiliser la même forme de base.
 
 Chaque "item" (vocabulaire, expression, ou grammaire) a un id unique court (lettres/chiffres/tirets)
 et l'une de ces formes :
 - Vocabulaire : {"id": "...", "type": "vocabulary", "word": "...", "meaning": "traduction anglaise",
   "partOfSpeech": "...", "level": "${level}", "topic": "...", "example": "phrase française complète",
-  "related": ["...", "..."]}
+  "related": ["...", "..."]}. Si "partOfSpeech" est un verbe, "word" est l'infinitif et ajoute
+  "conjugation": {"je": "...", "tu": "...", "ilElle": "...", "nous": "...", "vous": "...",
+  "ilsElles": "..."} (présent de l'indicatif). Si "partOfSpeech" est un adjectif, ajoute
+  "agreement": {"masculineSingular": "...", "feminineSingular": "...", "masculinePlural": "...",
+  "femininePlural": "..."}. Omets "conjugation"/"agreement" pour tout le reste (noms, adverbes,
+  etc. — rien à accorder ou conjuguer).
 - Expression : {"id": "...", "type": "phrase", "phrase": "...", "meaning": "traduction anglaise",
   "function": "...", "level": "${level}", "topic": "...", "tefUsage": "...", "example": "phrase
   française complète", "related": ["...", "..."]}
@@ -471,6 +534,38 @@ function safeUnit(raw) {
   };
 }
 
+const EXERCISE_TYPES = ["multiple_choice", "fill_blank", "translation", "pronunciation"];
+
+// Same shallow-validation philosophy as safeUnit above. "id"/"learningItemId" are assigned here,
+// not trusted from the model (see itemDrillSystemPrompt) — there's exactly one real learningItemId
+// per request, so there's no ambiguity to resolve.
+function safeItemExercises(raw, learningItemId) {
+  if (!Array.isArray(raw?.exercises)) return null;
+  const exercises = raw.exercises
+    .filter(
+      (e) =>
+        e &&
+        typeof e === "object" &&
+        EXERCISE_TYPES.includes(e.type) &&
+        e.prompt &&
+        e.content &&
+        typeof e.content === "object" &&
+        e.answer,
+    )
+    .slice(0, 8)
+    .map((e, i) => ({
+      id: `gen_${Date.now()}_${i}`,
+      learningItemId,
+      type: e.type,
+      stage: typeof e.stage === "string" ? e.stage : "recall",
+      prompt: String(e.prompt),
+      content: e.content,
+      answer: e.answer,
+      explanation: String(e.explanation ?? ""),
+    }));
+  return exercises.length ? exercises : null;
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     res.status(405).json({ error: "method_not_allowed" });
@@ -489,14 +584,28 @@ export default async function handler(req, res) {
     locale,
     level,
     existingTopics,
+    learningItemId,
+    term,
+    meaning,
+    variants,
+    question,
+    lessonTitle,
+    itemTerm,
   } = req.body ?? {};
   const llm = providerConfig(req.body);
   const safeLocale = locale === "fr" ? "fr" : "en";
 
   if (
-    !["turn", "score", "translate", "drill", "generateUnit", "test"].includes(
-      type,
-    )
+    ![
+      "turn",
+      "score",
+      "translate",
+      "ask",
+      "drill",
+      "itemDrill",
+      "generateUnit",
+      "test",
+    ].includes(type)
   ) {
     res.status(400).json({ error: "unknown_request_type" });
     return;
@@ -519,6 +628,45 @@ export default async function handler(req, res) {
       return;
     }
     res.status(200).json({ translation: data.translation });
+    return;
+  }
+
+  // type === 'ask' — a lesson's "Ask your AI tutor" free-form Q&A (spec §3.2.7). `question` is the
+  // learner's own text, bounded client-side and re-bounded here, and passed only in the user role
+  // as context + question — never spliced into the system prompt. `lessonTitle`/`itemTerm` come
+  // from our own course data and are bounded defensively anyway.
+  if (type === "ask") {
+    if (typeof question !== "string" || !question.trim()) {
+      res.status(400).json({ error: "invalid_question" });
+      return;
+    }
+    const safeQuestion = question.trim().slice(0, MAX_QUESTION_CHARS);
+    const safeTitle =
+      typeof lessonTitle === "string"
+        ? lessonTitle.trim().slice(0, MAX_CONTEXT_CHARS)
+        : "";
+    const safeItem =
+      typeof itemTerm === "string"
+        ? itemTerm.trim().slice(0, MAX_CONTEXT_CHARS)
+        : "";
+    const context = [safeTitle && `Leçon : « ${safeTitle} ».`, safeItem && `Élément étudié : « ${safeItem} ».`]
+      .filter(Boolean)
+      .join(" ");
+    const { data, error } = await callLLM(
+      askSystemPrompt(safeLocale),
+      [{ role: "user", parts: [{ text: `${context ? `${context} ` : ""}Question : ${safeQuestion}` }] }],
+      llm,
+      { maxTokens: 1024 },
+    );
+    if (error) {
+      res.status(502).json({ error });
+      return;
+    }
+    if (typeof data?.answer !== "string" || !data.answer.trim()) {
+      res.status(502).json({ error: "llm_unavailable" });
+      return;
+    }
+    res.status(200).json({ answer: data.answer });
     return;
   }
 
@@ -575,6 +723,42 @@ export default async function handler(req, res) {
     return;
   }
 
+  if (type === "itemDrill") {
+    if (
+      typeof learningItemId !== "string" ||
+      !learningItemId ||
+      typeof term !== "string" ||
+      !term.trim()
+    ) {
+      res.status(400).json({ error: "invalid_item" });
+      return;
+    }
+    const safeTerm = term.trim().slice(0, MAX_TERM_CHARS);
+    const safeMeaning =
+      typeof meaning === "string" ? meaning.trim().slice(0, MAX_MEANING_CHARS) : "";
+    const safeItemLevel =
+      typeof level === "string" && level.length <= MAX_LEVEL_CHARS ? level : "B1";
+    // Bounded, not schema-validated: only used to steer the prompt text, never parsed/trusted for
+    // anything structural — an oversized or malformed value is simply dropped.
+    const safeVariants =
+      variants && typeof variants === "object" && JSON.stringify(variants).length <= 500
+        ? variants
+        : null;
+    const { data, error } = await callLLM(
+      itemDrillSystemPrompt(safeTerm, safeMeaning, safeItemLevel, safeLocale, safeVariants),
+      [{ role: "user", parts: [{ text: safeTerm }] }],
+      llm,
+      { maxTokens: 4096 }, // bumped alongside the 5→8-exercises prompt change above
+    );
+    const exercises = safeItemExercises(data, learningItemId);
+    if (error || !exercises) {
+      res.status(502).json({ error: error ?? "llm_unavailable" });
+      return;
+    }
+    res.status(200).json({ exercises });
+    return;
+  }
+
   if (type === "generateUnit") {
     const safeLevel =
       typeof level === "string" && level.length <= 10 ? level : "B1";
@@ -588,7 +772,7 @@ export default async function handler(req, res) {
       generateUnitSystemPrompt(safeLevel, safeExisting, safeLocale),
       [{ role: "user", parts: [{ text: `Niveau : ${safeLevel}` }] }],
       llm,
-      { maxTokens: 8192 },
+      { maxTokens: 16384 }, // bumped alongside the 10-16-exercises-per-lesson prompt above
     );
     const unit = safeUnit(data);
     if (error || !unit) {

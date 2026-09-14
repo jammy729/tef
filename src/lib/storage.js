@@ -1,28 +1,55 @@
-// localStorage persistence per spec §5 data model, namespaced by profile id.
-// All reads/writes are try/catch-guarded — localStorage can throw in private browsing.
+// Progress persistence per spec §5 data model, namespaced by profile id (= the signed-in user's
+// Supabase auth id). Every exported function below still reads/writes synchronously against an
+// in-memory cache — see readBlob/writeBlob — so none of this module's callers need to become
+// async-aware. The cache itself is hydrated from Supabase on sign-in (hydrateFromSupabase) and
+// every write is pushed to Supabase in the background (debounced, best-effort).
 
 import { learningItem } from '../content/course'
 import { updateMastery } from './learningEngine/mastery'
 import { isDue, scheduleReview } from './learningEngine/reviewScheduler'
+import { supabase } from './supabase/client'
 
-const KEY = 'tef:v1'
 const LOCALE_KEY = 'tef:locale'
 
+let cache = { profiles: {} }
+let currentUserId = null
+let syncTimer = null
+
+// ponytail: full-blob debounced upsert, no offline queue/retry, no cross-tab conflict resolution
+// — fine at this app's 1-2-user scale; add real diffing/queueing if write volume/users grow.
+function scheduleSync() {
+  if (!currentUserId) return
+  clearTimeout(syncTimer)
+  syncTimer = setTimeout(() => {
+    supabase
+      .from('profiles')
+      .upsert({ id: currentUserId, data: cache })
+      .then(({ error }) => {
+        if (error) console.error('Supabase profile sync failed', error)
+      })
+  }, 800)
+}
+
+export async function hydrateFromSupabase(userId) {
+  currentUserId = userId
+  const { data, error } = await supabase.from('profiles').select('data').eq('id', userId).maybeSingle()
+  if (error) console.error('Supabase profile fetch failed', error)
+  cache = data?.data ?? { profiles: {} }
+}
+
+export function clearCache() {
+  currentUserId = null
+  cache = { profiles: {} }
+  clearTimeout(syncTimer)
+}
+
 function readBlob() {
-  try {
-    const raw = localStorage.getItem(KEY)
-    return raw ? JSON.parse(raw) : { lastProfileId: null, profiles: {} }
-  } catch {
-    return { lastProfileId: null, profiles: {} }
-  }
+  return cache
 }
 
 function writeBlob(blob) {
-  try {
-    localStorage.setItem(KEY, JSON.stringify(blob))
-  } catch {
-    // ponytail: localStorage full/unavailable — session data is lost for this write, not fatal.
-  }
+  cache = blob
+  scheduleSync()
 }
 
 function readProfile(blob, profileId) {
@@ -32,22 +59,7 @@ function readProfile(blob, profileId) {
     errorStats: profile.errorStats ?? {},
     lessonProgress: profile.lessonProgress ?? {},
     learningProgress: profile.learningProgress ?? {},
-  }
-}
-
-export function getLastProfileId() {
-  try {
-    return localStorage.getItem('tef:lastProfileId')
-  } catch {
-    return null
-  }
-}
-
-export function setLastProfileId(id) {
-  try {
-    localStorage.setItem('tef:lastProfileId', id)
-  } catch {
-    // ignore
+    meta: profile.meta ?? null,
   }
 }
 
@@ -143,6 +155,21 @@ export function addSession(profileId, session) {
   }
   writeBlob(blob)
   return blob.profiles[profileId]
+}
+
+// --- Onboarding (spec §4): per-profile display name + self-assessed starting level, ---
+// --- captured once on first use. Still no accounts — just local profile setup. ---
+
+export function getProfileMeta(profileId) {
+  return readProfile(readBlob(), profileId).meta
+}
+
+export function setProfileMeta(profileId, meta) {
+  const blob = readBlob()
+  const current = readProfile(blob, profileId)
+  blob.profiles[profileId] = { ...current, meta: { ...current.meta, ...meta } }
+  writeBlob(blob)
+  return blob.profiles[profileId].meta
 }
 
 // --- Learn & Practice (spec §3.3) ---

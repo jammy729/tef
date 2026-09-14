@@ -24,6 +24,8 @@ Goal: prove the core loop of the Call feature works before anything else is buil
 - [x] Serverless LLM proxy endpoint (single function, holds API key) — free-chat conversational turn only
 - [x] Minimal "in a call" screen: mic button, live transcript, call timer
 - [x] Unsupported-browser fallback message (no SpeechRecognition/synthesis)
+- [x] Mode-aware spoken French greeting opens the call (free / Task A / Task B / mock) — no dead-silence start
+- [x] Mic-permission-denied / speech-recognition errors surface a clear specific message on the call (no silent failure)
 - Spec refs: §3.2.1, §5
 
 ## Phase 0.5 — Home dashboard (navigation shell)
@@ -59,7 +61,8 @@ Goal: the app's own chrome text is translatable, English by default, so it's leg
       components — nav, headers, buttons, section labels, aria-labels
 - [x] `LocaleContext` (`src/lib/i18n/LocaleContext.jsx`): `{locale, setLocale, t}`, persisted to
       `localStorage`, default `'en'`
-- [x] EN/FR toggle in `AppSidebar`
+- [x] EN/FR toggle — now in the Settings screen's Language card (moved from `AppSidebar`, see
+      Phase 1's sidebar-cleanup line)
 - [x] Hard boundary enforced: the tutor's French speech, the learner's transcript, and
       corrections/vocabulary from the LLM proxy are never run through `t()` — they're always
       rendered as the raw French the API/recognizer returned
@@ -92,13 +95,55 @@ reflect current code.
 - Spec refs: §3.1, §5, §6 (non-goals: no style/tone rewriting beyond grammar/spelling/vocabulary)
 
 ## Phase 1 — Profiles + persistence
-- [x] Two static profiles (spec §4) via `src/lib/profiles.jsx` (`PROFILES`, `ProfileProvider`,
-      `useProfile()`) — no gating picker screen; a click on the sidebar avatar/name row switches
-      instantly, last-used profile id persisted in local storage
-- [x] Save each completed call's transcript + corrections + scores to that profile's `sessions` in
-      local storage (`src/lib/storage.js` `addSession`, spec §5 data model)
+
+Superseded by real accounts below — the two-static-profile/local-only model (static `PROFILES`
+array, sidebar profile-switcher, `resetOnboarding()`-as-fake-logout) has been fully replaced, not
+just supplemented. Kept for history:
+- [x] ~~Two static profiles, sidebar profile-switcher~~ — removed (see Phase 1.5)
+- [x] Settings screen reorganized as three tabs — Profile (edit name/starting level,
+      `saveProfile()`), Language (the EN/FR toggle), AI provider — via a new
+      `src/components/ui/tabs.jsx` (Radix `Tabs` wrapper, no new dependency) —
+      `src/components/SettingsScreen.jsx`
+- [x] Save each completed call's transcript + corrections + scores to that profile's `sessions`
+      (`src/lib/storage.js` `addSession`, spec §5 data model)
 - [x] `HistoriqueScreen` reads the active profile's most recent session (basic session history —
       always "latest", no session-by-id browsing/list view yet)
+- [x] Optional placement quiz in onboarding (spec §4): `getPlacementExercises()`
+      (`src/content/course.js`) samples existing A2/B1-tagged exercises, run through
+      `ExerciseRunner`; score maps to a pre-filled (editable) level chip via a threshold heuristic
+
+## Phase 1.5 — Supabase accounts + progress (spec §4/§5)
+
+- [x] `supabase/migrations/20260914063036_create_profiles_table.sql`: one `public.profiles` table
+      (`id uuid` = auth user id, `data jsonb`), RLS enabled, `auth.uid() = id` policies for
+      select/insert/update (`TO authenticated`, `WITH CHECK` on update) — applied to the live
+      project and verified (table + policies confirmed via `psql`, a real sign-up/onboarding/
+      sign-out/sign-in round trip confirmed the row is written and read back correctly)
+- [x] `src/lib/supabase/client.js`: shared `supabase` singleton (`@supabase/ssr`'s
+      `createBrowserClient`); `server.js` (an SSR cookie-client template that doesn't fit this
+      SPA + proxy architecture) removed
+- [x] `src/lib/storage.js`: `readBlob`/`writeBlob` now back an in-memory cache instead of
+      `localStorage` directly — `hydrateFromSupabase(userId)` populates it after sign-in, every
+      write pushes a debounced (~800ms) background upsert; every other exported function's
+      signature/body is unchanged, so none of the 9 components calling into `storage.js` needed
+      to change. `getLastProfileId`/`setLastProfileId` removed (no longer meaningful)
+- [x] `src/lib/profiles.jsx`: static `PROFILES` array removed; `ProfileProvider` now tracks a real
+      Supabase session (`getSession` + `onAuthStateChange`), exposes `session`/`ready`/
+      `signUp`/`signIn`/`signOut` alongside the unchanged `profile`/`completeOnboarding`/
+      `saveProfile` shape; `resetOnboarding` removed (superseded by real `signOut`)
+- [x] `OnboardingScreen`: a real email+password sign-in/sign-up step (toggle, handles the
+      email-confirmation-required case); sign-up also collects the display name directly, so a new
+      account skips the separate name step and goes straight to level/quiz setup — the name step
+      remains as a fallback for an account that signed up but never finished setup
+- [x] `App.jsx`'s `Router` gates on `!session || !profile.onboarded` (was just `!profile.onboarded`)
+      and shows a blank loading frame while `ready` is false
+- [x] `AppSidebar`'s logout button now calls real `signOut()`; `ObjectifScreen`'s exam-date badge
+      guarded like `CallInsights` already did (no seeded exam date for real accounts)
+- [ ] Data migration of pre-Supabase local dev/test data — explicitly not attempted (no real
+      account to attribute it to)
+- [x] Real per-screen URL paths (`/learn`, `/lesson/:id`, `/call`, `/historique`, `/objectif`,
+      `/progress`, `/settings`, `/registration`) via the native History API
+      (`src/lib/router.js`, no router dependency) — back/forward and bookmarking work
 - Spec refs: §4, §5
 
 ## Phase 2 — In-call corrections and results
@@ -160,7 +205,7 @@ Engine" layering the original proposal called for is a plain client-side module 
 - [x] Seed content: B1 "Expressing Opinions" unit, 3 lessons (Opinion Expressions / Giving Reasons
       / Adding Examples & Contrast), 5 vocabulary items, 5 phrases, 2 grammar concepts, 18
       exercises total — not a single fake lesson
-- [x] 4 exercise types — multiple choice, fill-in-the-blank, translation, production
+- [x] 4 exercise types — multiple choice, fill-in-the-blank, translation, pronunciation
       (`ExerciseRunner` renders by `exercise.type`, no per-lesson hardcoding) — word-selection,
       sentence-ordering, matching, and listening-prep deferred (spec §3.4)
 - [x] Answer evaluation as a pure/engine concern, not in the UI: `src/lib/learningEngine/evaluate.js`
@@ -168,11 +213,87 @@ Engine" layering the original proposal called for is a plain client-side module 
       `type: "evaluate"` for free-form production answers (the "backend evaluation abstraction"
       the original proposal asked for, realized as this app's existing stateless LLM proxy rather
       than a new service, since there's no server framework to host one)
-- [x] Lesson flow: Learn stage (LearningItem cards, `InteractiveText` reused for examples) →
-      Practice stage (`ExerciseRunner`) → completion summary (accuracy + items practiced, not XP)
+- [x] "Build the sentence" (tile-based `production` exercise, `TileBuilder`) replaced by a speaking
+      exercise (`type: "pronunciation"`, `SpeakingPrompt.jsx`): the learner reads the target
+      sentence aloud via `SpeechRecognition` (fr-FR, tap mic to start, tap again to stop early);
+      `evaluatePronunciation()` passes on an exact normalized match or ≥ 70% word-overlap against
+      the target — a text-similarity heuristic, not true phoneme scoring (spec §6). All 31
+      hand-authored exercises across the 15 unit files migrated (one-off script, verified by
+      `bun test` + diff spot-checks); `api/tutor.js`'s `EXERCISE_TYPES`/`EXERCISE_SHAPE_NOTE`/
+      `itemDrillSystemPrompt`/`generateUnitSystemPrompt` updated so AI-generated content produces
+      `pronunciation` exercises too; `TileBuilder.jsx`/`evaluateProduction()` deleted
+- [x] Conjugation/agreement depth for real grammar (spec §3.2.1): `vocabulary` items gain optional
+      `conjugation` (verb person forms, je/tu/il-elle/nous/vous/ils-elles) and `agreement`
+      (adjective gender/number forms) fields, rendered as tap-to-hear tables by
+      `LessonScreen`'s `LearningItemCard`/`FormsGrid`. Authored by `generateUnitSystemPrompt` for
+      new content **and** backfilled across all 15 hand-authored unit files (28 variant tables in
+      total): every verb / verb-phrase / expression item with a genuine person paradigm carries
+      `conjugation`, every qualifying adjective carries `agreement`, nouns and invariant phrases
+      correctly none. Non-present-tense phrases set `conjugation.tense` (_on devrait_, _je
+      voudrais_ → `conditional`); cells where elision or a clitic/reflexive pronoun would make a
+      bare form misleading are authored as full phrases including the subject ("J'ai mal à", "Je
+      m'occupe de") and `FormsGrid` renders/speaks them as-is instead of doubling the pronoun
+      label. `course.test.js` validates table shape (all six person cells, all four agreement
+      cells, `tense` ∈ present/conditional) and that only verb/adjective items carry them
+- [x] Lesson flow: **Learn is a sequential study session** (not a wall of cards) — the learner
+      steps through each LearningItem one at a time with Prev/Next + a "Studying item X of Y"
+      progress header, the item's term auto-spoken aloud on entry (ref-guarded against dev
+      double-mounts), and its full conjugation/agreement table laid out tap-to-hear so the forms
+      are *understood* before any exercise → Practice stage (`ExerciseRunner`) → completion
+      summary (accuracy + items practiced, not XP)
+- [x] Practice **covers all cases** (spec §3.2.3): on entering Practice, `LessonScreen` fires
+      `type: "itemDrill"` for each conjugation/agreement-bearing item in the lesson (bounded to 4
+      items so one lesson never makes more than a handful of proxy calls) and merges the fresh
+      form-spread exercises after the authored ones, behind a "preparing practice" loading state —
+      practice runs the whole je/tu/il-elle/nous/vous/ils-elles / agreement-plural range; falls
+      back to authored-only when the proxy is quota'd/unavailable
+- [x] "Ask your AI tutor" on lessons (spec §3.2.7): `LessonAsk.jsx` renders at the bottom of every
+      lesson stage — Learn, Practice, and the completion summary — a free-form text question (the
+      one deliberate `<textarea>` in the app, since it's comprehension Q&A, not an exercise)
+      answered by the learner's chosen provider via new `type: "ask"` proxy request
+      `{question, lessonTitle, itemTerm, locale}` → `{answer}` in the UI locale. Question capped
+      client-side (300 chars) and re-bounded server-side in the `user` role only; answers rendered
+      raw (generated teaching content, not chrome); errors via `llmErrorKey`; ephemeral per-session
+      history
+- [x] "Practice more" per learning item (`ItemPractice.jsx`, on every Learn-stage card): new
+      `type: "itemDrill"` request generates 8 fresh exercises (was 5) for just that word/
+      expression/grammar point, in the `generateUnit` exercise shape so they run through
+      `ExerciseRunner` (and count toward mastery) rather than a bespoke mini-stepper. When the item
+      has a `conjugation`/`agreement` table, that's sent along too (`variants`) so the generated
+      exercises spread across different forms instead of always testing the base form
+- [x] `ExerciseRunner` shuffles its exercises (Fisher-Yates) once per mount — lesson practice,
+      review, and the placement quiz all run in a fresh random order every session instead of the
+      fixed authored order
+- [x] `generateUnitSystemPrompt` bumped from 4-6 to 10-16 exercises per lesson, with guidance to
+      cover an item's different grammatical forms across those exercises when it has
+      `conjugation`/`agreement` — `generateUnit`'s `maxTokens` raised 8192→16384 to match
 - [x] Feedback that teaches: every correct/incorrect answer shows *why*, not just right/wrong;
       "Try again" + "Continue" both always available on a miss; a `hints` array (when authored)
       reveals progressively — demonstrated on one exercise, not every exercise
+- [x] `ExerciseRunner` speaks each question aloud on load and plays a distinct synthesized chime on
+      submit, correct or incorrect (`src/lib/audio.js` `speak`/`speakFrench`/`playCorrectSound`/
+      `playIncorrectSound`) — covers lesson practice, review, and the onboarding placement quiz
+      (§4) for free, since all three share this one component
+- [x] `frenchTermFor()` (`ExerciseRunner.jsx`): a `multiple_choice` exercise on a vocabulary/phrase
+      item shows+speaks just the French term (tap to hear again) instead of a "What does X mean?"
+      sentence; exercise types where the French form is the answer, or that already show their
+      French content directly, are left alone so nothing leaks the answer
+- [x] Settings screen gained a **Speaker** tab (`src/lib/settings.js` `voice: {rate, gender}`):
+      a speed slider and a female/male voice preference (name-based heuristic over available
+      browser voices), with a live Preview button — read by `speak`/`speakFrench` everywhere
+- [x] Fixed: the Male/Female toggle silently no-op'ing to the same voice on platforms where the
+      name heuristic matched neither gender — `pickFrenchVoice()` now falls back to a stable
+      first/last split of available French voices instead of both genders converging on the same
+      "prefer non-local voice" pick; also fixed `getVoices()` returning empty on the very first
+      call after page load (`waitForVoices()`) and a Chrome bug where a stale `SpeechSynthesisVoice`
+      reference gets silently ignored partway through a longer utterance (voice now re-resolved
+      fresh per spoken segment, not cached once per call)
+- [x] `speakSegments()` (`src/lib/audio.js`): splits spoken text on punctuation and inserts a
+      pause between segments (longer after `.`/`!`/`?` than after `,`) so speech has real cadence
+      instead of reading fast/flat — the Web Speech API has no SSML/break-tag support, so this is
+      the only way to get deliberate pauses. `stopSpeaking()` cancels an in-flight chain via a
+      generation counter, since `speechSynthesis.cancel()` alone doesn't stop already-scheduled
+      chained segments; `useVoiceCall`'s mute now calls this instead of `cancel()` directly
 - [x] Mastery engine (`src/lib/learningEngine/mastery.js`): per-item 0-100 mastery from real
       attempt history (New/Learning/Familiar/Strong/Mastered bands), not "lesson complete = 100%"
 - [x] Review scheduler (`src/lib/learningEngine/reviewScheduler.js`): replaceable function, fixed
@@ -339,3 +460,36 @@ OpenAI-compatible endpoint), and give it a real Settings screen (the sidebar's l
       relying on the provider (spec §5)
 - [x] `bun run lint`/`bun run build`/`bun test` clean
 - Spec refs: §3.1 (all request types), §5, §7
+
+## Phase 11 — Provider status + AI usage visibility on dashboard
+Goal: surface AI provider status and client-side call-count usage on the Progress dashboard so the
+learner is aware of their key config and how many proxy calls they've made.
+- [x] `src/lib/usage.js` — client-side usage tracker (`tef:usage:v1` in `localStorage`, global like
+      settings): `recordCall(provider, type)`, `recordTest(provider, status)`, `getUsage()`,
+      `callsToday()`, `callsByType()`. Call counts only (proxy returns no token counts — §7).
+      Bounded to the most recent 500 entries so the blob can't grow unbounded.
+- [x] `src/lib/llm.js` — every proxy call that reaches the server (network failures excluded) is
+      counted via `recordCall(meta.provider, payload.type)` after the response is parsed, so usage
+      is accurate without needing proxy-side changes.
+- [x] `SettingsScreen.jsx` — after a "Test connection" result, `recordTest(provider, status)` is
+      called so the dashboard can show the most recent provider health state (ok/auth/quota/generic).
+- [x] `ProgressScreen.jsx` — two new always-visible cards above the mastery/sessions sections:
+      **AI provider** card (active provider name, key-configured badge with green/muted dot, last
+      test result with color-coded status dot, "Manage in Settings" button), and **AI usage** card
+      (total/today count stat cards, per-request-type breakdown sorted alphabetically, empty-state
+      prompt when no calls yet). Both read from `settings.js`/`usage.js` on every render — no
+      React state or caching layer needed.
+- [x] `AppSidebar.jsx` — compact **AI provider status widget** above the target-level card so the
+      provider + connection-status dot (green/red/amber/gray) + today's request count stay visible
+      on every screen; the card is a button that navigates to Settings. Mirrors the dashboard's
+      status semantics (reuses `settings.js`/`usage.js` + the `sidebar.provider*` i18n keys).
+- [x] i18n: 20 new keys per language (progress.provider.*, progress.usage.*, usage.type.*) — chrome
+      only; the provider name is rendered via `t(activeProvider.labelKey)`, never hardcoded.
+- [x] `src/lib/usage.test.js` — unit tests for record/reads/count helpers: multi-call recording,
+      today vs. yesterday filtering, 500-cap truncation, malformed-blob fallback, lastTest
+      overwrite, empty state.
+- [x] Spec + roadmap + CLAUDE.md updated: §5 (architecture, request-type paragraph, localStorage
+      layer inventory), §7 (usage visibility paragraph), `ROADMAP.md` Phase 11, CLAUDE.md dashboard
+      description and non-migrated-storage list.
+- [x] `bun run lint`/`bun run build`/`bun test` clean
+- Spec refs: §5, §7
